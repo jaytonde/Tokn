@@ -1,7 +1,9 @@
 
 import torch
+import time
 import threading
 from queue import Queue
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 @dataclass
@@ -41,6 +43,7 @@ class GenerationResult:
     
 
 class InferenceEngine:
+
     def __init__(self,
                  config: EngineConfig,
                  model_fn: callable | None = None):
@@ -91,7 +94,7 @@ class InferenceEngine:
                       temperature: float = 1.0,
                       top_p: float = 1.0) -> int:
         if temperature == 0:
-            return logits.softmax(logits / temperature, dim=-1)
+            return logits.argmax().item()
         
         probs = torch.softmax(logits / temperature, dim=-1)
 
@@ -105,12 +108,89 @@ class InferenceEngine:
 
             return torch.multinomial(probs, 1).item()
 
-    def generate(self):
-        pass
+    def generate(self, request: GenerationRequest) -> GenerationResult:
+        start_time = time.perf_counter() #Highest resolution timer available on the system (nanosecond precision on most platforms)
+        first_token_time = None
 
-    def generate_stream(self):
-        pass
+        model_fn = self.model_fn or self._dummy_model
+        output_tokens = []
 
-    def get_stats(self):
-        pass
+        tokens = torch.tensor([request.prompt_tokens])
+
+        for i in range(request.max_tokens):
+
+            logits = model_fn(tokens)
+
+            next_token = self._sample_token(
+                logits[0, -1] if logits.dim() == 3 else logits[0],
+                request.temperature,
+                request.top_p
+            )
+
+            if first_token_time is None:
+                first_token_time = time.perf_counter()
+
+            output_tokens.append(next_token)
+
+            if next_token in request.stop_token_ids:
+                finish_reason = "stop"
+                break
+
+            tokens = torch.cat([tokens, torch.tensor([[next_token]])], dim=1)
+
+        end_time = time.perf_counter()
+
+        result = GenerationRequest(
+            request_id=request.request_id,
+            output_tokens=output_tokens,
+            finish_reason=finish_reason,
+            prompt_tokens=len(request.prompt_tokens),
+            completion_tokens=len(output_tokens),
+            time_to_first_token_ms=(first_token_time - start_time) * 1000 if first_token_time else 0,
+            total_time_ms=(end_time - start_time) * 1000
+        )
+
+        with self.lock:
+            #Only one thread updates the states at a time so we can avoid race condition.
+            self.total_requests += 1
+            self.total_tokens_generated += len(output_tokens)
+            self.total_time_ms += request.total_time_ms
+
+        return result
+
+    def generate_stream(self, request: GenerationRequest) -> Iterator[int]:
+        model_fn = self.model_fn or self._dummy_model
+
+        tokens = torch.tensor([request.prompt_tokens])
+
+        for i in range(request.max_tokens):
+            logits = model_fn(tokens)
+
+            next_token = self._sample_token(
+                logits[0, -1] if logits.dim() == 3 else logits[0], #logits[0, -1] → takes batch 0, last sequence position → shape [32000]
+                request.temperature,
+                request.top_p,
+            )
+
+            yield next_token
+
+            if next_token in request.stop_token_ids:
+                break
+
+            tokens = torch.cat([
+                tokens,
+                torch.tensor([[next_token]])
+            ], dim=1)
+
+    def get_stats(self) -> dict:
+        with self.lock:
+            avg_time = self.total_time_ms / self.total_requests if self.total_requests > 0 else 0
+            throughput = self.total_tokens_generated / (self.total_time_ms / 1000) if self.total_time_ms > 0 else 0
     
+            return {
+                "total_requests" : self.total_requests,
+                "total_tokens" : self.total_tokens_generated,
+                "total_time_ms" : self.total_time_ms,
+                "avg_latency_ms" : avg_time,
+                "thorughtput_tokens_per_sec" : throughput
+            }
