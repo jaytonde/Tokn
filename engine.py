@@ -46,7 +46,7 @@ class InferenceEngine:
 
     def __init__(self,
                  config: EngineConfig,
-                 model_fn: callable | None = None):
+                 model_fn: Callable | None = None):
         
         self.config = config
         self.model_fn = model_fn
@@ -106,7 +106,7 @@ class InferenceEngine:
             sorted_probs = sorted_probs / sorted_probs.sum()
             probs = torch.zeros_like(probs).scatter_(0, sorted_indices, sorted_probs)
 
-            return torch.multinomial(probs, 1).item()
+        return torch.multinomial(probs, 1).item()
 
     def generate(self, request: GenerationRequest) -> GenerationResult:
         start_time = time.perf_counter() #Highest resolution timer available on the system (nanosecond precision on most platforms)
@@ -140,13 +140,13 @@ class InferenceEngine:
 
         end_time = time.perf_counter()
 
-        result = GenerationRequest(
+        result = GenerationResult(
             request_id=request.request_id,
             output_tokens=output_tokens,
             finish_reason=finish_reason,
             prompt_tokens=len(request.prompt_tokens),
             completion_tokens=len(output_tokens),
-            time_to_first_token_ms=(first_token_time - start_time) * 1000 if first_token_time else 0,
+            time_to_first_token=(first_token_time - start_time) * 1000 if first_token_time else 0,
             total_time_ms=(end_time - start_time) * 1000
         )
 
@@ -154,7 +154,7 @@ class InferenceEngine:
             #Only one thread updates the states at a time so we can avoid race condition.
             self.total_requests += 1
             self.total_tokens_generated += len(output_tokens)
-            self.total_time_ms += request.total_time_ms
+            self.total_time_ms += result.total_time_ms
 
         return result
 
@@ -194,3 +194,76 @@ class InferenceEngine:
                 "avg_latency_ms" : avg_time,
                 "thorughtput_tokens_per_sec" : throughput
             }
+        
+
+def explain_engine() -> str:
+    return """
+                Inference Engine Design
+
+                The engine orchestrates all components:
+                - Model execution
+                - KV cache management
+                - Scheduling
+                - Tokenization
+
+                Request lifecycle:
+                1. Submit: client sends prompt
+                2. Tokenize: convert text to tokens
+                3. Queue: add to pending requests
+                4. Schedule: decide when to run
+                5. Generate: run model iterations
+                6. Stream/Return: send results back
+
+                Generation loop:
+                1. Prefill: process prompt, fill KV cache
+                2. Decode: generate tokens one at a time
+                3. Sample: pick next token from logits
+                4. Check: stop if EOS or max_tokens
+
+                Sampling strategies:
+                - Temperature: scale logits before softmax
+                - Top-p: nucleus sampling
+                - Top-k: sample from top k tokens
+                - Greedy: argmax (temperature=0)
+
+                Streaming:
+                - Yield tokens as generated
+                - Client sees partial response
+                - Better perceived latency
+
+                Batched generation:
+                - Multiple requests in single forward pass
+                - Continuous batching for efficiency
+                - Different sequences at different stages
+                
+           """
+
+
+if __name__ == "__main__":
+    print(explain_engine)
+
+    print("\n" +"=" * 60)
+    print("Inference Engine Demo")
+    print("-" * 60)
+
+    config = EngineConfig(vocab_size=1000)
+    engine = InferenceEngine(config)
+
+    request = GenerationRequest(
+        request_id=0,
+        prompt_tokens=[1,2,3,4,5],
+        temperature=1.0,
+        stop_token_ids=[0]
+    )
+
+    result = engine.generate(request)
+
+    print(f"Request ID: {result.request_id}")
+    print(f"Prompt tokens: {result.prompt_tokens}")
+    print(f"Completion tokens: {result.completion_tokens}")
+    print(f"Finish reason: {result.finish_reason}")
+    print(f"TTFT: {result.time_to_first_token:.2f} ms")
+    print(f"Total time: {result.total_time_ms:.2f} ms")
+    print(f"Tokens/sec: {result.tokens_per_second:.1f}")
+
+    print(f"\nEngine stats: {engine.get_stats()}")
