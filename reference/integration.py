@@ -4,10 +4,10 @@ import asyncio
 import threading
 from dataclasses import dataclass
 
-from tokenizer_workers import TokenizerPool
-from engine import EngineConfig, GenerationRequest, InferenceEngine
-from api_design import ChatCompletionRequest, ChatCompletionResponse
-from fastapi_server import InferenceServer, RateLimiter, ServerMetrics
+from reference.tokenizer_workers import TokenizerPool
+from reference.engine import EngineConfig, GenerationRequest, InferenceEngine
+from reference.api_design import ChatCompletionRequest, ChatCompletionResponse
+from reference.fastapi_server import InferenceServer, RateLimiter, ServerMetrics
 
 
 @dataclass
