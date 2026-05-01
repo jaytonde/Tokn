@@ -10,7 +10,6 @@ class SiluAndMul(nn.Module):
     multiply them elementwise
     """
 
-    @torch.compile #asks PyTorch to compile/optimize this function
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, y = x.chunk(2, -1) #splits it into two equal parts along the last dimension
         return F.silu(x) * y #One half is the “activation” branch, the other is the “gate” branch.

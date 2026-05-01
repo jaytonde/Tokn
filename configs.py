@@ -20,5 +20,5 @@ class ServerConfigs:
         parser.add_argument("--port", type=int, default=8080)
         parser.add_argument("--device", default="cpu")
         args = parser.parse_args()
-        return cls(model=args.model, host=args.host, port=args.port)
+        return cls(model=args.model, host=args.host, port=args.port, device=args.device)
     

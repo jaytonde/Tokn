@@ -58,7 +58,7 @@ class Qwen3Attention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
-            max_position=max_position,
+            max_postion=max_position,
             base=rope_theta,
         )
         self.attn = Attention(
@@ -76,6 +76,7 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        input_shape = hidden_states.shape
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = q.view(-1, self.num_heads, self.head_dim)
@@ -87,7 +88,7 @@ class Qwen3Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v)
         output = self.o_proj(o.flatten(1, -1))
-        return output
+        return output.view(input_shape)
 
 
 
@@ -212,7 +213,8 @@ class Qwen3ForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions)
+        hidden_states = self.model(input_ids, positions)
+        return self.compute_logits(hidden_states)
 
     def compute_logits(
         self,

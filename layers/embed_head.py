@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torch.utils.context as dist
-from tokn.context import get_context
+import torch.distributed as dist
+from context import get_context
 
 class VocabParallelEmbedding(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int):
@@ -28,7 +28,7 @@ class VocabParallelEmbedding(nn.Module):
             mask = (x >= self.vocab_start_idx) & (x < self.vocab_end_idx)
             x = mask * (x - self.vocab_start_idx)
 
-        y = F.embeddings(x, self.weight)
+        y = F.embedding(x, self.weight)
 
         if self.tp_size > 1:
             y = mask.unsqueeze(1) * y

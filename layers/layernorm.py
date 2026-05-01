@@ -17,7 +17,7 @@ class RMSNorm(nn.Module):
         return x
 
     def add_rms_forward(self, x: torch.Tensor, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        orig_dtype = x.shape
+        orig_dtype = x.dtype
         x          = x.float().add_(residual.float())
         residual   = x.to(orig_dtype)
         var        = x.pow(2).mean(dim=-1, keepdim=True) 

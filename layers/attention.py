@@ -1,10 +1,10 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
-from tokn import get_context
+from context import get_context
 
 @triton.jit
 def store_kvcache_kernel(key_ptr, key_stride, value_ptr, value_stride, k_cache_ptr, v_cache_ptr, slot_mapping_ptr, D:tl.constexpr):
@@ -53,13 +53,17 @@ class Attention(nn.Module):
             if context.block_tables is not None:
                 k, v = k_cache, v_cache
 
-            o = flash_attn_varlen_func(q, k, v,
-                                       max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                                       max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                       softmax_scale=self.cache, causal=True, block_table=context.block_tables)
-        else:
-            o = flash_attn_with_kvcache(q.unsqeeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables,
-                                        softmax_scale=self.scale, causal=True)
+        # Reshape for SDPA: (seq, heads, head_dim) -> (1, heads, seq, head_dim)
+        q = q.unsqueeze(0).transpose(1, 2)
+        k = k.unsqueeze(0).transpose(1, 2)
+        v = v.unsqueeze(0).transpose(1, 2)
 
-        return o
+        # GQA: repeat k/v heads to match q heads
+        if self.num_kv_heads != self.num_heads:
+            n_rep = self.num_heads // self.num_kv_heads
+            k = k.repeat_interleave(n_rep, dim=1)
+            v = v.repeat_interleave(n_rep, dim=1)
+
+        o = F.scaled_dot_product_attention(q, k, v, scale=self.scale, is_causal=True)
+        # (1, heads, seq, head_dim) -> (seq, heads, head_dim)
+        return o.transpose(1, 2).squeeze(0)

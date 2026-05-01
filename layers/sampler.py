@@ -4,7 +4,6 @@ from torch import nn
 
 class Sampler(nn.Module):
 
-    @torch.compile
     def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
         logits = logits.float().div_(temperatures) #divides by temperature
         probs = torch.softmax(logits, dim=-1) #converts logits into probabilities over the vocabulary
