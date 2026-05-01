@@ -14,7 +14,7 @@ def main():
         dtype=cfg.dtype,
         device=cfg.device
     )
-    print("Engine instantiated")
+    print("Engine instantiated..")
 
     engine.load()
 
