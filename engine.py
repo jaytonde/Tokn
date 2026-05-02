@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
 
+from context import reset_context, set_context
 from qwen3 import Qwen3ForCausalLM
 from loader import load_model
 
@@ -21,6 +22,16 @@ class Engine:
         self.hf_config = AutoConfig.from_pretrained(self.model)
 
         self.custom_model = Qwen3ForCausalLM(self.hf_config)
+
+    def _set_prefill_context(self, seq_len: int, device: torch.device):
+        cu_seqlens = torch.tensor([0, seq_len], device=device, dtype=torch.int32)
+        set_context(
+            is_prefill=True,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=seq_len,
+            max_seqlen_k=seq_len,
+        )
 
     def load(self):
 
@@ -56,9 +67,12 @@ class Engine:
         with torch.inference_mode():
             t_start = time.perf_counter()
             for step in range(max_tokens):
-                
-                logits = self.custom_model(input_ids=generated_ids, positions=positions)
-                next_token_logits = logits[:, -1, :]
+                self._set_prefill_context(generated_ids.shape[1], generated_ids.device)
+                try:
+                    logits = self.custom_model(input_ids=generated_ids.flatten(), positions=positions)
+                finally:
+                    reset_context()
+                next_token_logits = logits[-1, :].unsqueeze(0)
                 next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
                 generated_ids = torch.cat([generated_ids, next_token_id], dim=1)
@@ -110,4 +124,3 @@ class Engine:
         response = self.tokenizer.batch_decode(new_tokens, skip_special_tokens=True)[0]
 
         return response
-
