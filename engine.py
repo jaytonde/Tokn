@@ -128,7 +128,7 @@ class Engine:
         config = self.hf_config
 
         self.block_size = 256
-        self.num_blocks = 128
+        self.num_blocks = 256 * 2
 
         num_layers = config.num_hidden_layers
         num_kv_heads = config.num_key_value_heads
@@ -279,6 +279,8 @@ class Engine:
 
             positions = torch.arange(prompt_len, device=generated_ids.device)
 
+            #####----------PREFILL------------#####
+
             self._set_prefill_context(
                 seq_len=prompt_len,
                 block_table=block_table,
@@ -302,6 +304,9 @@ class Engine:
                     new_tokens,
                     skip_special_tokens=True,
                 )[0]
+            
+
+            #####----------DECODE------------#####
                 
             for step in range(1, max_tokens):
                 pos = generated_ids.shape[1] - 1
