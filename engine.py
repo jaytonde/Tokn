@@ -10,6 +10,12 @@ from context import reset_context, set_context
 from qwen3 import Qwen3ForCausalLM
 from loader import load_model
 
+
+from scheduler import Scheduler
+from sequence import Sequence
+
+
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
@@ -23,6 +29,9 @@ class Engine:
         self.hf_config = AutoConfig.from_pretrained(self.model)
 
         self.custom_model = Qwen3ForCausalLM(self.hf_config)
+
+        self.scheduler = None
+        self.outputs = {}
 
     def _make_block_table(self, max_len: int, device: torch.device):
         num_blocks = (max_len + self.block_size - 1) // self.block_size
@@ -46,8 +55,7 @@ class Engine:
         start_pos: int,
         num_tokens: int,
         block_table: torch.Tensor,
-        device: torch.device,
-    ):
+        device: torch.device ):
         slots = []
 
         for pos in range(start_pos, start_pos + num_tokens):
@@ -170,6 +178,12 @@ class Engine:
 
         #Initializing the KV Cache
         self.allocate_kv_cache()
+
+        self.scheduler = Scheduler(
+            max_num_seqs=8,
+            max_num_batched_tokens=4096,
+            eos_token_id=self.tokenizer.eos_token_id
+        )
 
         self.model = AutoModelForCausalLM.from_pretrained(self.model, torch_dtype=self.dtype).to(self.device)
         logger.info("HF reference model loaded")
@@ -353,3 +367,64 @@ class Engine:
             response = response.split("</think>")[-1]
 
             return response
+
+
+    def prepare_prefill():
+        pass
+
+    def prepare_decode():
+        pass
+
+    def add_request(self, prompt: str, max_tokens: int = 128):
+        messages = [{"role": "user", "content": prompt}]
+
+        text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False, # returns the formatted string instead of token IDs
+            add_generation_prompt=True #appends the assistant turn header (<|im_start|>assistant\n) so the model knows to start generating a response
+        ) 
+
+        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
+        generated_ids = model_inputs["input_ids"]
+
+        seq = Sequence(
+            token_ids = generated_ids,
+            max_tokens = max_tokens
+        )
+
+        prompt_len = generated_ids.shape[1]
+        max_total_len = prompt_len + max_tokens
+
+        seq.block_table = self._make_block_table(
+            max_len=max_total_len,
+            device=generated_ids.device,
+        )
+        
+        self.scheduler.add(seq)
+
+    @torch.inference_mode
+    def step(self):
+        seqs, is_prefill = self.scheduler.schedule()
+
+        if is_prefill:
+            input_ids, positions = self.prepare_prefill(seqs)
+        else:
+            input_ids, positions = self.prepare_decode(seqs)
+
+        try:
+            logits = self.custom_model(
+                input_ids=input_ids,
+                positions=positions,
+            )
+        finally:
+            reset_context()
+
+        next_token_ids = torch.argmax(logits, dim=-1).tolist()
+
+        finished = self.scheduler.postprocess(
+            seqs=seqs,
+            token_ids=next_token_ids,
+            is_prefill=is_prefill,
+        )
+
+        return finished
