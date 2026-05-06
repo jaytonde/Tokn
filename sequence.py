@@ -14,6 +14,6 @@ class Sequence:
     def last_token(self):
         return self.token_ids[-1]
 
-    def append_token(self, token_id)
+    def append_token(self, token_id):
         self.token_ids.append(token_id)
         self.num_generated_tokens += 1
