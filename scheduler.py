@@ -22,3 +22,19 @@ class Scheduler:
             return []
 
         return list(self.running)
+
+    def schedule(self):
+        
+        if self.waiting:
+            seq = self.waiting.popleft()
+            self.running.add(seq)
+            return [seq], True
+        else:
+            return [seq], False
+
+    def is_finished(self):
+        return True if not self.waiting
+
+    def postprocess(self, seqs, token_ids, is_prefill):
+        self.running.popleft()
+        

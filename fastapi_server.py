@@ -1,12 +1,13 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
+from typing import List
 
 
 
 
 class CompletionRequest(BaseModel):
-    prompt: str
+    prompts: List[str]
 
 
 def build_app(engine):
@@ -16,7 +17,7 @@ def build_app(engine):
     @app.post("/completions")
     async def completions(req: CompletionRequest):
         print(f"\n\nRequest received for with the prompt : {req.prompt}")
-        response = engine.seperate_prefill_decode(req.prompt)
+        response = engine.generate_v2(req.prompts)
         return response
     
     return app
