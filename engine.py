@@ -371,11 +371,94 @@ class Engine:
 
     #Scheduler functions
 
-    def prepare_prefill():
-        pass
+    def prepare_prefill(self, seqs):
+        input_ids = []
+        positions = []
+        slot_mapping = []
+        cu_seqlens = [0]
 
-    def prepare_decode():
-        pass
+        max_len = 0
+
+        for seq in seqs:
+            start = seq.num_cached_tokens
+            end = start + seq.num_scheduled_tokens
+
+            tokens = seq.token_ids[start:end]
+
+            input_ids.extend(tokens)
+            positions.extend(range(start, end))
+            cu_seqlens.append(cu_seqlens[-1] + len(tokens))
+            max_seqlen = max(max_seqlen, len(tokens))
+
+            for pos in range(start, end):
+                logical_block_id = pos // self.block_size
+                block_offset = pos % self.block_size
+                physical_block_id = seq.block_table[0, logical_block_id].item()
+                slot = physical_block_id * self.block_size + block_offset
+                slot_mapping.append(slot)
+
+        device = torch.device(self.device)
+
+        input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
+        positions = torch.tensor(positions, dtype=torch.long, device=device)
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, device=device)
+
+        set_context(
+            is_prefill=True,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            slot_mapping=slot_mapping,
+            block_tables=None,
+        )
+
+        return input_ids, positions
+
+    def prepare_decode(self, seqs):
+        input_ids = []
+        positions = []
+        slot_mapping = []
+        context_lens = []
+        block_tables = []
+
+        for seq in seqs:
+            pos = len(seq.token_ids) - 1
+
+            input_ids.append(seq.last_token)
+            positions.append(pos)
+            context_lens.append(len(seq.token_ids))
+
+            logical_block_id = pos // self.block_size
+            block_offset = pos % self.block_size
+            physical_block_id = seq.block_table[0, logical_block_id].item()
+            slot = physical_block_id * self.block_size + block_offset
+            slot_mapping.append(slot)
+
+            block_tables.append(seq.block_table.squeeze(0).tolist())
+
+            max_blocks = max(len(x) for x in block_tables)
+
+            block_tables = [x + [-1] * (max_blocks - len(x)) for x in block_tables] #wht?
+
+            device = torch.device(self.device)
+
+            input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
+            positions = torch.tensor(positions, dtype=torch.long, device=device)
+            slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, device=device)
+            context_lens = torch.tensor(context_lens, dtype=torch.int32, device=device)
+            block_tables = torch.tensor(block_tables, dtype=torch.int32, device=device)
+
+            set_context(
+                is_prefill=False,
+                slot_mapping=slot_mapping,
+                context_lens=context_lens,
+                block_tables=block_tables,
+            )
+
+            return input_ids, positions
+
 
     def add_request(self, prompt: str, max_tokens: int = 128):
         messages = [{"role": "user", "content": prompt}]
@@ -430,3 +513,19 @@ class Engine:
         )
 
         return finished
+
+    def generate_v2(self, prompts: list[str], max_tokens: int = 128):
+    
+        for prompt in prompts:
+            self.add_request(prompt, max_tokens=max_tokens)
+
+        outputs = {}
+
+        while not self.scheduler.is_finished():
+            finished = self.step()
+
+            for seq in finished:
+                output_ids = seq.token_ids[seq.num_prompt_tokens:]
+                text = self.tokenizer.decode(output_ids, skip_special_tokens=True)
+                outputs[seq.seq_id] = text
+        return outputs
