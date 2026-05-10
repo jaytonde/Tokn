@@ -6,7 +6,7 @@
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/debug_serve.py",
-      "python": "/home/jovyan/tokn/bin/python",
+      "python": "/home/Tokn/.venv/bin/python",
       "args": [],
       "console": "integratedTerminal",
       "justMyCode": false,

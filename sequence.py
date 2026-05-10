@@ -8,7 +8,7 @@ class Sequence:
 
         self.seq_id = next(Sequence.counter)
 
-        self.token_ids = list[token_ids]
+        self.token_ids = list(token_ids)
         self.num_prompt_tokens = len(self.token_ids)
         self.num_tokens = len(self.token_ids)
 
@@ -26,9 +26,9 @@ class Sequence:
 
         self.last_token = self.token_ids[-1]
 
-    @property
-    def last_token(self):
-        return self.token_ids[-1]
+    # @property
+    # def last_token(self):
+    #     return self.token_ids[-1]
 
     def append_token(self, token_id):
         self.token_ids.append(token_id)

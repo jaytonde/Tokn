@@ -470,19 +470,20 @@ class Engine:
         ) 
 
         model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
-        generated_ids = model_inputs["input_ids"][0].tolist()
+        input_ids_tensor = model_inputs["input_ids"][0]
+        generated_ids = input_ids_tensor.tolist()
 
         seq = Sequence(
             token_ids = generated_ids,
             max_tokens = max_tokens
         )
 
-        prompt_len = generated_ids.shape[1]
+        prompt_len = len(generated_ids)
         max_total_len = prompt_len + max_tokens
 
         seq.block_table = self._make_block_table(
             max_len=max_total_len,
-            device=generated_ids.device,
+            device=input_ids_tensor.device,
         )
         
         self.scheduler.add(seq)
