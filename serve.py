@@ -13,7 +13,7 @@ def main():
 
     if not dist.is_initialized():
         os.environ.setdefault("MASTER_ADDR", "localhost")
-        os.environ.setdefault("MASTER_PORT", "29500")
+        os.environ.setdefault("MASTER_PORT", "29501")
         dist.init_process_group(backend="nccl", rank=0, world_size=1)
 
     engine = Engine(
