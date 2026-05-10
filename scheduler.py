@@ -66,5 +66,24 @@ class Scheduler:
     def postprocess(self, seqs, token_ids, is_prefill):
         finished = []
 
-        for se
-        self.running.popleft()
+        for seq, token_id in zip(seqs, token_ids):
+            seq.num_cached_tokens += seq.num_scheduled_tokens
+            seq.num_scheduled_tokens = 0
+
+            seq.append_token(token_id)
+
+            done = (
+                token_id == self.eos_token_id
+                or
+                seq.num_generated_tokens >= seq.max_tokens
+            )
+
+            if done:
+                seq.status = "FINISHED"
+                finished.append(seq)
+            else:
+                seq.status = "RUNNING"
+                self.running.append(seq)
+
+
+        return finished

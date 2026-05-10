@@ -470,7 +470,7 @@ class Engine:
         ) 
 
         model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
-        generated_ids = model_inputs["input_ids"]
+        generated_ids = model_inputs["input_ids"][0].tolist()
 
         seq = Sequence(
             token_ids = generated_ids,
