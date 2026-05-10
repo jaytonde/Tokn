@@ -377,7 +377,7 @@ class Engine:
         slot_mapping = []
         cu_seqlens = [0]
 
-        max_len = 0
+        max_seqlen = 0
 
         for seq in seqs:
             start = seq.num_cached_tokens
@@ -438,26 +438,26 @@ class Engine:
 
             block_tables.append(seq.block_table.squeeze(0).tolist())
 
-            max_blocks = max(len(x) for x in block_tables)
+        max_blocks = max(len(x) for x in block_tables)
 
-            block_tables = [x + [-1] * (max_blocks - len(x)) for x in block_tables] #wht?
+        block_tables = [x + [-1] * (max_blocks - len(x)) for x in block_tables] #wht?
 
-            device = torch.device(self.device)
+        device = torch.device(self.device)
 
-            input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
-            positions = torch.tensor(positions, dtype=torch.long, device=device)
-            slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, device=device)
-            context_lens = torch.tensor(context_lens, dtype=torch.int32, device=device)
-            block_tables = torch.tensor(block_tables, dtype=torch.int32, device=device)
+        input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
+        positions = torch.tensor(positions, dtype=torch.long, device=device)
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, device=device)
+        context_lens = torch.tensor(context_lens, dtype=torch.int32, device=device)
+        block_tables = torch.tensor(block_tables, dtype=torch.int32, device=device)
 
-            set_context(
-                is_prefill=False,
-                slot_mapping=slot_mapping,
-                context_lens=context_lens,
-                block_tables=block_tables,
-            )
+        set_context(
+            is_prefill=False,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables,
+        )
 
-            return input_ids, positions
+        return input_ids, positions
 
 
     def add_request(self, prompt: str, max_tokens: int = 128):
