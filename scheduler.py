@@ -28,17 +28,43 @@ class Scheduler:
         return list(self.running)
 
     def schedule(self):
-        
+        scheduled = []
+
+        #PREFILL
         if self.waiting:
-            seq = self.waiting.popleft()
-            self.running.append(seq)
-            return [seq], True
-        else:
+            num_batched_tokens = 0
+
+            while self.waiting and len(scheduled) < self.max_num_seqs:
+                seq = self.waiting[0]
+                num_tokens = seq.num_tokens - seq.num_cached_tokens
+
+                if num_batched_tokens + num_tokens > self.max_num_batched_tokens:
+                    break
+
+                self.waiting.popleft()
+                seq.status = "RUNNING"
+                seq.num_scheduled_tokens = num_tokens
+
+                scheduled.append(seq)
+                self.running.append(seq)
+                num_batched_tokens += num_tokens
+            
+            return scheduled, True
+
+        #DECODE
+        while self.running and len(scheduled) < self.max_num_seqs:
             seq = self.running.popleft()
-            return [seq], False
+            seq.num_scheduled_tokens = 1
+            scheduled.append(seq)
+
+        return scheduled, False
+        
 
     def is_finished(self):
-        return True if not self.waiting else False
+        return not self.waiting and not self.running
 
     def postprocess(self, seqs, token_ids, is_prefill):
+        finished = []
+
+        for se
         self.running.popleft()
