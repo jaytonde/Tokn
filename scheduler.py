@@ -46,7 +46,6 @@ class Scheduler:
                 seq.num_scheduled_tokens = num_tokens
 
                 scheduled.append(seq)
-                self.running.append(seq)
                 num_batched_tokens += num_tokens
             
             return scheduled, True
@@ -84,6 +83,5 @@ class Scheduler:
             else:
                 seq.status = "RUNNING"
                 self.running.append(seq)
-
 
         return finished

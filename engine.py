@@ -32,18 +32,22 @@ class Engine:
 
         self.scheduler = None
         self.outputs = {}
+        self.next_free_block = 0
 
     def _make_block_table(self, max_len: int, device: torch.device):
         num_blocks = (max_len + self.block_size - 1) // self.block_size
 
-        if num_blocks > self.num_blocks:
+        if self.next_free_block + num_blocks > self.num_blocks:
             raise RuntimeError(
-                f"Request needs {num_blocks} KV blocks, "
+                f"Request needs {num_blocks} KV blocks starting at {self.next_free_block}, "
                 f"but only {self.num_blocks} are allocated."
             )
 
+        start = self.next_free_block
+        self.next_free_block += num_blocks
+
         block_table = torch.arange(
-            num_blocks,
+            start, start + num_blocks,
             device=device,
             dtype=torch.int32,
         ).unsqueeze(0)  # shape: [1, num_blocks]
@@ -460,7 +464,7 @@ class Engine:
         return input_ids, positions
 
 
-    def add_request(self, prompt: str, max_tokens: int = 128):
+    def add_request(self, prompt: str, max_tokens: int = 1024):
         messages = [{"role": "user", "content": prompt}]
 
         text = self.tokenizer.apply_chat_template(
@@ -515,7 +519,8 @@ class Engine:
 
         return finished
 
-    def generate_v2(self, prompts: list[str], max_tokens: int = 128):
+    def generate_v2(self, prompts: list[str], max_tokens: int = 2048):
+        self.next_free_block = 0
     
         for prompt in prompts:
             self.add_request(prompt, max_tokens=max_tokens)
@@ -528,5 +533,5 @@ class Engine:
             for seq in finished:
                 output_ids = seq.token_ids[seq.num_prompt_tokens:]
                 text = self.tokenizer.decode(output_ids, skip_special_tokens=True)
-                outputs[seq.seq_id] = text
+                outputs[seq.seq_id] = text.split("</think>")[-1]
         return outputs
