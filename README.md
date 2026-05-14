@@ -21,8 +21,7 @@ Developing my own LLM Inference server like vLLM.
 
 ![image](llm_benchmarks.png)
 
-|total request | 102 |
-|----|----|
-|tokn | 457 tok/sec |
-|vLLM | 30,000 tok /sec |
+|total request | tokn | vLLM |
+|----|----|----|
+| 102 | 457 tok/sec | 30,000 tok/sec|
 
