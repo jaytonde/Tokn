@@ -19,7 +19,7 @@ Developing my own LLM Inference server like vLLM.
 
 ## Current State
 
-![image](llm_benchmarks)
+![image](llm_benchmarks.png)
 
 total request : 102
 tokn : 457 tok/sec.
