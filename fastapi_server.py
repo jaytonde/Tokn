@@ -17,7 +17,7 @@ def build_app(engine):
     @app.post("/completions")
     async def completions(req: CompletionRequest):
         print(f"\n\nRequest received for with the prompt : {req.prompts}")
-        response = engine.generate_v2(req.prompts)
-        return response
+        response, throughput = engine.generate_v2(req.prompts)
+        return response, throughput
     
     return app

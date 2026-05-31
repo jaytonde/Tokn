@@ -1,4 +1,5 @@
 from itertools import count
+from sampling_params import SamplingParams
 
 class Sequence:
 
@@ -25,6 +26,10 @@ class Sequence:
         self.status = "WAITING"
 
         self.last_token = self.token_ids[-1]
+        self.sampling_params = SamplingParams()
+
+        self.block_table_ids = []
+        self.num_hashed_blocks = 0
 
     # @property
     # def last_token(self):

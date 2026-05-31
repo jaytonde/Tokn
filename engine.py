@@ -1,7 +1,9 @@
 import re
 import time
 import logging
+import os
 import torch
+import torch.distributed as dist
 from dataclasses import dataclass
 from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
@@ -11,8 +13,13 @@ from qwen3 import Qwen3ForCausalLM
 from loader import load_model
 
 
+from tqdm import tqdm
+
 from scheduler import Scheduler
 from sequence import Sequence
+from sampling_params import SamplingParams
+
+from block_manager import BlockManager
 
 
 
@@ -21,21 +28,29 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 class Engine:
 
-    def __init__(self, model: str = "Qwen/Qwen2.5-0.5B", device: str = "cpu", dtype: str = "fp16"):
+    def __init__(self, model: str = "Qwen/Qwen2.5-0.5B", enforce_eager=False, device: str = "cpu", dtype: str = "fp16", max_model_len: int = 2048):
         self.model = model
         self.dtype = torch.float16 if dtype=="fp16" else torch.bfloat16
         self.device = device
 
         self.hf_config = AutoConfig.from_pretrained(self.model)
 
+        if not dist.is_initialized():
+            os.environ.setdefault("MASTER_ADDR", "localhost")
+            os.environ.setdefault("MASTER_PORT", "29501")
+            dist.init_process_group(backend="nccl" if device == "cuda" else "gloo", world_size=1, rank=0)
+
         self.custom_model = Qwen3ForCausalLM(self.hf_config)
 
         self.scheduler = None
         self.outputs = {}
         self.next_free_block = 0
+        self.max_model_len = max_model_len
 
-    def _make_block_table(self, max_len: int, device: torch.device):
-        num_blocks = (max_len + self.block_size - 1) // self.block_size
+        self.load()
+
+    def _make_block_table(self, device: torch.device):
+        num_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
 
         if self.next_free_block + num_blocks > self.num_blocks:
             raise RuntimeError(
@@ -139,13 +154,25 @@ class Engine:
         """
         config = self.hf_config
 
+        # FlashAttention paged KV cache requires block_size divisible by 256.
         self.block_size = 256
-        self.num_blocks = 256 * 2
 
         num_layers = config.num_hidden_layers
         num_kv_heads = config.num_key_value_heads
 
         head_dim = getattr(config, 'head_dim', None) or config.hidden_size // config.num_attention_heads
+
+        requested_num_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
+
+        # Static sizing with headroom for multi-request batching.
+        self.num_blocks = max(64, requested_num_blocks + 16)
+
+        logger.info(
+            "KV cache sizing (static): max_model_len=%d, requested_blocks=%d, selected_blocks=%d",
+            self.max_model_len,
+            requested_num_blocks,
+            self.num_blocks,
+        )
 
         self.kv_cache = torch.empty(
             2,            # K and V
@@ -158,16 +185,22 @@ class Engine:
             dtype=self.dtype
         ) # (2, 28, 128, 256, 8, 128)
 
+        self.block_manager = BlockManager(
+            num_blocks=self.num_blocks,
+            block_size=self.block_size,
+        )
+
         layer_id = 0
         for layer in self.custom_model.model.layers:
             layer.self_attn.attn.k_cache = self.kv_cache[0, layer_id]
             layer.self_attn.attn.v_cache = self.kv_cache[1, layer_id]
             layer_id += 1
 
-        logger.info(
-            f"KV cache allocated: "
-            f"layers={num_layers}, blocks={self.num_blocks}, "
-            f"block_size={self.block_size}, kv_heads={num_kv_heads}, head_dim={head_dim}"
+        logger.warning(
+            f"\n\nBlockManager initialized: "
+            f"\nnum_blocks={self.block_manager.num_blocks}, "
+            f"\nblock_size={self.block_manager.block_size}, "
+            f"\nfree_blocks={len(self.block_manager.free_block_ids)}"
         )
 
     def load(self):
@@ -184,7 +217,7 @@ class Engine:
         self.allocate_kv_cache()
 
         self.scheduler = Scheduler(
-            max_num_seqs=8,
+            max_num_seqs=1,
             max_num_batched_tokens=4096,
             eos_token_id=self.tokenizer.eos_token_id
         )
@@ -288,7 +321,6 @@ class Engine:
         max_total_len = prompt_len + max_tokens
 
         block_table = self._make_block_table(
-            max_len=max_total_len,
             device=generated_ids.device,
         )
 
@@ -463,8 +495,7 @@ class Engine:
 
         return input_ids, positions
 
-
-    def add_request(self, prompt: str, max_tokens: int = 1024):
+    def add_request(self, prompt: str, sampling_params: SamplingParams):
         messages = [{"role": "user", "content": prompt}]
 
         text = self.tokenizer.apply_chat_template(
@@ -479,16 +510,38 @@ class Engine:
 
         seq = Sequence(
             token_ids = generated_ids,
-            max_tokens = max_tokens
+            max_tokens = sampling_params.max_tokens
         )
 
-        prompt_len = len(generated_ids)
-        max_total_len = prompt_len + max_tokens
+        seq.sampling_params = sampling_params
 
-        seq.block_table = self._make_block_table(
-            max_len=max_total_len,
-            device=input_ids_tensor.device,
+        cached_blocks = self.block_manager.match_prefix(generated_ids)
+
+        alloc_token_ids = generated_ids + ([0] * sampling_params.max_tokens)
+        block_table_ids = self.block_manager.allocate(
+            token_ids = alloc_token_ids,
+            num_cached_blocks=cached_blocks
         )
+
+        seq.block_table_ids = block_table_ids
+        seq.block_table = self.block_manager.make_block_table_tensor(
+            block_table=block_table_ids,
+            device=input_ids_tensor.device
+        )
+
+        seq.num_cached_tokens = cached_blocks * self.block_size
+        seq.num_hashed_blocks = cached_blocks
+
+        
+        # old code
+        # prompt_len = len(generated_ids)
+        # max_total_len = prompt_len + self.max_model_len
+
+        # seq.block_table = self._make_block_table(
+        #     device=input_ids_tensor.device,
+        # )
+
+        
         
         self.scheduler.add(seq)
 
@@ -517,21 +570,55 @@ class Engine:
             is_prefill=is_prefill,
         )
 
+        for seq in seqs:
+            start_block = seq.num_hashed_blocks
+            end_block = len(seq.token_ids) // self.block_size
+
+            if end_block > start_block:
+                self.block_manager.hash_completed_blocks(
+                    token_ids=seq.token_ids,
+                    block_table=seq.block_table_ids,
+                    start_block=start_block,
+                    end_block=end_block
+                )
+                seq.num_hashed_blocks = end_block
+
+        for seq in finished:
+            self.block_manager.deallocate(seq.block_table_ids)
+
         return finished
 
-    def generate_v2(self, prompts: list[str], max_tokens: int = 2048):
-        self.next_free_block = 0
+    def generate_v2(self, prompts: list[str], sampling_params : list[SamplingParams] = []):
     
-        for prompt in prompts:
-            self.add_request(prompt, max_tokens=max_tokens)
+        for idx, prompt in enumerate(prompts):
+            if len(sampling_params):
+                self.add_request(prompt, sampling_params[idx])
+            else:
+                self.add_request(prompt, SamplingParams())
 
         outputs = {}
+
+        t_start = time.perf_counter()
+
+        finished_seqs = []
+        pbar = tqdm(total=len(prompts), desc="Processing prompts")
 
         while not self.scheduler.is_finished():
             finished = self.step()
 
             for seq in finished:
+
+                finished_seqs.append(seq)
                 output_ids = seq.token_ids[seq.num_prompt_tokens:]
                 text = self.tokenizer.decode(output_ids, skip_special_tokens=True)
                 outputs[seq.seq_id] = text.split("</think>")[-1]
-        return outputs
+                pbar.update(1)
+
+        pbar.close()
+
+        elapsed = time.perf_counter() - t_start
+
+        total_output_tokens = sum(seq.num_generated_tokens for seq in finished_seqs)
+        throughput = total_output_tokens / elapsed if elapsed > 0 else 0
+
+        return outputs, throughput

@@ -13,17 +13,16 @@ def main():
 
     if not dist.is_initialized():
         os.environ.setdefault("MASTER_ADDR", "localhost")
-        os.environ.setdefault("MASTER_PORT", "29501")
+        os.environ.setdefault("MASTER_PORT", "29502")
         dist.init_process_group(backend="nccl", rank=0, world_size=1)
 
     engine = Engine(
         model=cfg.model,
         dtype=cfg.dtype,
-        device=cfg.device
+        device=cfg.device,
+        max_model_len=cfg.max_length,
     )
     print("Engine instantiated..")
-
-    engine.load()
 
     app = build_app(engine)
 
