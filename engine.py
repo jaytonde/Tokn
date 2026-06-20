@@ -158,9 +158,6 @@ class Engine:
         #Initializing the KV Cache
         self.allocate_kv_cache()
 
-        if self.device.startswith("cuda") and not self.enforce_eager:
-            self.capture_cudagraph()
-
         self.scheduler = Scheduler(
             max_num_seqs=5,
             max_num_batched_tokens=1024,
@@ -168,6 +165,9 @@ class Engine:
             block_manager=self.block_manager,
             device=self.device,
         )
+
+        if self.device.startswith("cuda") and not self.enforce_eager:
+            self.capture_cudagraph()
 
         self.model = AutoModelForCausalLM.from_pretrained(self.model, torch_dtype=self.dtype).to(self.device)
         logger.info("HF reference model loaded")
@@ -197,7 +197,7 @@ class Engine:
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
             set_context(
-                is_prefill=True,
+                is_prefill=False,
                 slot_mapping=slot_mapping[:bs],
                 context_lens=context_lens[:bs],
                 block_tables=block_tables[:bs]
@@ -231,7 +231,7 @@ class Engine:
 
         bs      = input_ids.size(0)
         context = get_context()
-        graph   = self.graphs[next(x for x in self.graphs_bs if x >= bs)]
+        graph   = self.graphs[next(x for x in self.graph_bs if x >= bs)]
         gv      = self.graph_vars
 
         gv["input_ids"][:bs] = input_ids
