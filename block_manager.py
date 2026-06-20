@@ -40,7 +40,6 @@ class BlockManager:
 
         return h.intdigest()
 
-
     def _block_tokens(self, token_ids: list[int], block_idx: int) -> list[int]:
         """
         Returns token IDs for one logical block.
@@ -121,7 +120,6 @@ class BlockManager:
             prev_hash = block_hash
 
         return matched_blocks
-
 
     def allocate(self, token_ids: list[int], num_cached_blocks: int) -> list[int]:
 
@@ -211,7 +209,6 @@ class BlockManager:
 
             prev_hash = block_hash
 
-
     def deallocate(self, block_table: list[int]):
 
         for block_id in reversed(block_table):
@@ -228,7 +225,6 @@ class BlockManager:
             if block.ref_count == 0:
                 self.used_block_ids.remove(block_id)
                 self.free_block_ids.append(block_id)
-
 
     def make_block_table_tensor(
         self,

@@ -1,8 +1,8 @@
+import time
 from itertools import count
 from sampling_params import SamplingParams
 
 class Sequence:
-
     counter = count()
 
     def __init__(self, token_ids, max_tokens):
@@ -28,19 +28,37 @@ class Sequence:
         self.last_token = self.token_ids[-1]
         self.sampling_params = SamplingParams()
 
-        self.block_table_ids = []
-        self.num_hashed_blocks = 0
-
-    # @property
-    # def last_token(self):
-    #     return self.token_ids[-1]
+        self.arrival_time = None
+        self.token_timestamps = []
 
     def append_token(self, token_id):
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
         self.num_generated_tokens += 1
+        self.token_timestamps.append(time.perf_counter())
 
     @property
     def completion_token_ids(self):
         return self.token_ids[self.num_prompt_tokens:]
+
+    @property
+    def ttft(self):
+        """Time To First Token: arrival -> first generated token (seconds)."""
+        if self.arrival_time is None or not self.token_timestamps:
+            return None
+        return self.token_timestamps[0] - self.arrival_time
+
+    @property
+    def itls(self):
+        """Inter-Token Latencies: gaps between consecutive generated tokens (seconds)."""
+        ts = self.token_timestamps
+        return [ts[i] - ts[i - 1] for i in range(1, len(ts))]
+
+    @property
+    def tpot(self):
+        """Time Per Output Token: mean decode-step latency = mean(ITL) (seconds)."""
+        if len(self.token_timestamps) < 2:
+            return None
+        decode_time = self.token_timestamps[-1] - self.token_timestamps[0]
+        return decode_time / (len(self.token_timestamps) - 1)

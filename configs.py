@@ -15,17 +15,10 @@ class ServerConfigs:
         parser = argparse.ArgumentParser()
         parser.add_argument("--model", required=True)
         parser.add_argument("--dtype", default="float16")
-        parser.add_argument("--max_length", type=int, default=2048)
+        parser.add_argument("--max_length", default=2048)
         parser.add_argument("--host", default="127.0.0.1")
         parser.add_argument("--port", type=int, default=8080)
         parser.add_argument("--device", default="cpu")
         args = parser.parse_args()
-        return cls(
-            model=args.model,
-            host=args.host,
-            port=args.port,
-            dtype=args.dtype,
-            max_length=args.max_length,
-            device=args.device,
-        )
+        return cls(model=args.model, host=args.host, port=args.port, device=args.device)
     
