@@ -8,14 +8,20 @@ Developing my own LLM Inference server like vLLM.
 3. Multiple requests processing.
 4. Scheduler to schedule requests.
 5. Seperate prefill and Decode.
+6. Prefix Caching
+7. Continuous batching
+8. Chunked prefill
 
 ## Things are coming
 
-1. Prefix Caching
-2. Continuous batching
+
+1. Torch compilation
+2. CUDA Graphs
 3. Speculative decoding
 4. Quantization
-5. CUDA Graphs
+5. Distributed inference
+   etc.
+
 
 ## Current State
 
