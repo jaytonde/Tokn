@@ -1,4 +1,4 @@
-from engine import Engine
+from src.engine import Engine
 from sampling_params import SamplingParams
 
 class LLM(Engine):

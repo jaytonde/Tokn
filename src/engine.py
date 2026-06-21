@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
 
-from context import reset_context, set_context
+from utils.context import reset_context, set_context
 from qwen3 import Qwen3ForCausalLM
-from loader import load_model
+from utils.loader import load_model
 
 
 import re
@@ -24,19 +24,19 @@ from dataclasses import dataclass
 from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
 
-from context import reset_context, set_context
+from utils.context import reset_context, set_context
 from qwen3 import Qwen3ForCausalLM
-from loader import load_model
+from utils.loader import load_model
 
 
 from tqdm import tqdm
 
-from scheduler import Scheduler
-from sequence import Sequence
+from src.scheduler import Scheduler
+from utils.sequence import Sequence
 from sampling_params import SamplingParams
-from block_manager import BlockManager
-from request_state import RequestState
-from context import get_context, reset_context, set_context
+from src.block_manager import BlockManager
+from utils.request_state import RequestState
+from utils.context import get_context, reset_context, set_context
 
 
 

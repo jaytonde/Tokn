@@ -1,5 +1,5 @@
 
-from sequence import Sequence
+from utils.sequence import Sequence
 import asyncio
 from dataclasses import dataclass
 

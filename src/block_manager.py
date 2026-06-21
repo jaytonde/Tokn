@@ -3,7 +3,7 @@ import xxhash
 import torch
 import numpy as np
 
-from block import Block
+from utils.block import Block
 from collections import deque
 
 
