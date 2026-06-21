@@ -104,7 +104,7 @@ def summarize(values):
 # tokn
 # --------------------------------------------------------------------------- #
 def run_tokn(args) -> dict:
-    from llm import LLM
+    from src.llm import LLM
     from sampling_params import SamplingParams
 
     prompts = load_questions(args.questions, args.num_prompts)
