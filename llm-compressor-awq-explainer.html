@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Compressor AWQ Code Walkthrough</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #182026;
+      --muted: #5d6a73;
+      --line: #cad3da;
+      --panel: #f7f9fb;
+      --accent: #1f6f8b;
+      --accent-2: #8b5f1f;
+      --green: #2f7d51;
+      --red: #a33b3b;
+      --code: #101418;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: #ffffff;
+      line-height: 1.5;
+    }
+    header, main { max-width: 1180px; margin: 0 auto; padding: 28px; }
+    header { padding-top: 38px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0 0 10px; font-size: 34px; line-height: 1.1; letter-spacing: 0; }
+    h2 { margin: 38px 0 14px; font-size: 24px; }
+    h3 { margin: 24px 0 10px; font-size: 18px; }
+    p { margin: 8px 0 12px; }
+    code, pre {
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+    }
+    code { color: var(--code); background: #edf1f4; padding: 2px 5px; border-radius: 4px; }
+    pre { overflow: auto; background: #101418; color: #f5f7fa; padding: 16px; border-radius: 8px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .subtitle { max-width: 900px; color: var(--muted); font-size: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+    .card {
+      grid-column: span 4;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: var(--panel);
+    }
+    .card strong { display: block; margin-bottom: 6px; }
+    .wide { grid-column: span 12; }
+    .half { grid-column: span 6; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: 12px;
+      align-items: stretch;
+      margin: 16px 0 8px;
+    }
+    .step {
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 112px;
+      background: #fff;
+    }
+    .step:not(:last-child)::after {
+      content: ">";
+      position: absolute;
+      right: -11px;
+      top: 43%;
+      color: var(--muted);
+      font-weight: 700;
+      background: #fff;
+    }
+    .step .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .step .t { font-weight: 700; margin-top: 4px; }
+    .step .d { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .diagram {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      background: #fff;
+      overflow-x: auto;
+    }
+    .lane {
+      display: grid;
+      grid-template-columns: 170px repeat(4, minmax(170px, 1fr));
+      gap: 10px;
+      min-width: 920px;
+      margin-bottom: 10px;
+      align-items: stretch;
+    }
+    .lane-label {
+      background: #e8eef2;
+      border-radius: 8px;
+      padding: 12px;
+      font-weight: 700;
+    }
+    .box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel);
+      min-height: 82px;
+      font-size: 13px;
+    }
+    .box.accent { border-color: #87b6cf; background: #eef7fb; }
+    .box.green { border-color: #9fc8ad; background: #eef8f2; }
+    .box.warn { border-color: #d9bd83; background: #fbf5e8; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #eef2f5; }
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: #eef7fb;
+      padding: 12px 14px;
+      margin: 16px 0;
+    }
+    .mini {
+      display: grid;
+      grid-template-columns: 1fr 80px 1fr 80px 1fr;
+      gap: 8px;
+      align-items: center;
+      max-width: 920px;
+    }
+    .mini .node { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel); text-align: center; }
+    .arrow { text-align: center; color: var(--muted); font-weight: 700; }
+    @media (max-width: 820px) {
+      header, main { padding: 20px; }
+      .card, .half { grid-column: span 12; }
+      .flow { grid-template-columns: 1fr; }
+      .step:not(:last-child)::after { content: "v"; right: 50%; top: auto; bottom: -14px; }
+      .mini { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LLM Compressor: AWQ Quantization Code Walkthrough</h1>
+    <p class="subtitle">
+      Top-down map of how <code>vllm-project/llm-compressor</code> quantizes a model, where AWQ finds activation-weighted scales, and where the actual qparams / quantized behavior are implemented.
+    </p>
+  </header>
+  <main>
+    <section>
+      <h2>One-Line Mental Model</h2>
+      <div class="grid">
+        <div class="card">
+          <strong>AWQModifier</strong>
+          Finds per-channel smoothing scales from calibration activations and temporary quantized-weight error.
+        </div>
+        <div class="card">
+          <strong>QuantizationModifier</strong>
+          Attaches quantization schemes, observers, qparams, and frozen quantization status to target modules.
+        </div>
+        <div class="card">
+          <strong>compressed_tensors</strong>
+          Provides the low-level quantization lifecycle, fake/forward quantization, and compressed checkpoint packing.
+        </div>
+      </div>
+      <div class="callout">
+        AWQ in this repo is a transform, not the final packer. It rescales model weights to protect salient activation channels, then the normal quantization path computes qparams and saves compressed tensors.
+      </div>
+    </section>
+
+    <section>
+      <h2>User-Level Flow</h2>
+      <pre><code>recipe = [
+    AWQModifier(duo_scaling="both"),
+    QuantizationModifier(
+        ignore=["lm_head"],
+        scheme="W4A16_ASYM",
+        targets=["Linear"],
+    ),
+]
+
+oneshot(model=model, dataset=ds, recipe=recipe, ...)
+model.save_pretrained(SAVE_DIR, save_compressed=True)</code></pre>
+      <p>Example source: <code>examples/awq/llama_example.py</code>.</p>
+    </section>
+
+    <section>
+      <h2>Top-Down Activity Diagram</h2>
+      <div class="flow">
+        <div class="step">
+          <div class="k">1</div>
+          <div class="t">oneshot()</div>
+          <div class="d">Build calibration dataloader and run a CompressionSession.</div>
+        </div>
+        <div class="step">
+          <div class="k">2</div>
+          <div class="t">initialize</div>
+          <div class="d">AWQ infers mappings. Quantization attaches schemes to Linear layers.</div>
+        </div>
+        <div class="step">
+          <div class="k">3</div>
+          <div class="t">calibration</div>
+          <div class="d">Forward pass over samples. AWQ caches activations and parent inputs. Observers collect stats.</div>
+        </div>
+        <div class="step">
+          <div class="k">4</div>
+          <div class="t">layer boundary</div>
+          <div class="d">AWQ grid-searches scales. Quantization computes scale / zero-point qparams.</div>
+        </div>
+        <div class="step">
+          <div class="k">5</div>
+          <div class="t">save</div>
+          <div class="d">Frozen quantization metadata is packed by compressed_tensors.</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Swimlane: Who Does What</h2>
+      <div class="diagram">
+        <div class="lane">
+          <div class="lane-label">Entry point</div>
+          <div class="box accent"><strong>oneshot.py</strong><br>Creates dataloader, initializes session, chooses calibration pipeline.</div>
+          <div class="box">Calls lifecycle initialize.</div>
+          <div class="box">Runs calibration pipeline.</div>
+          <div class="box">Finalizes modifiers.</div>
+        </div>
+        <div class="lane">
+          <div class="lane-label">Sequential pipeline</div>
+          <div class="box">Traces model into subgraphs.</div>
+          <div class="box">Disables quantized forward while collecting clean activations.</div>
+          <div class="box accent">After each subgraph calls <code>sequential_epoch_end</code>.</div>
+          <div class="box">Optionally propagates compressed outputs to next subgraph.</div>
+        </div>
+        <div class="lane">
+          <div class="lane-label">AWQModifier</div>
+          <div class="box">Infer/resolve mappings.</div>
+          <div class="box green">Cache activation sums/counts for channels.</div>
+          <div class="box green">Grid search scales using quantized-weight reconstruction error.</div>
+          <div class="box green">Apply scale to balance weights and inverse scale to smooth layer.</div>
+        </div>
+        <div class="lane">
+          <div class="lane-label">QuantizationModifier</div>
+          <div class="box">Resolve scheme such as <code>W4A16_ASYM</code>.</div>
+          <div class="box">Attach observers and hooks.</div>
+          <div class="box warn">Observe weights and activations; update qparams.</div>
+          <div class="box warn">Freeze quantization, remove observers.</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>AWQ Scale Search</h2>
+      <div class="mini">
+        <div class="node">Calibration activations<br><code>X</code></div>
+        <div class="arrow">+</div>
+        <div class="node">Layer weights<br><code>W</code></div>
+        <div class="arrow">-&gt;</div>
+        <div class="node">Choose scale<br><code>s</code></div>
+      </div>
+      <pre><code>Loss(s) = || Q(W * s) * (X / s) - W * X ||</code></pre>
+      <p>
+        The repo implements this directly in <code>AWQModifier._compute_best_scale</code>.
+        It builds <code>x_mean</code> from cached absolute activations. With duo scaling enabled, it also computes <code>w_mean</code> from normalized weight magnitudes.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Part</th><th>Implementation</th><th>Meaning</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Activation salience</td>
+            <td><code>_setup_activation_cache_hooks</code></td>
+            <td>Forward hook collects <code>abs(input)</code>, flattens tokens, then stores per-channel sum and count.</td>
+          </tr>
+          <tr>
+            <td>Weight contribution</td>
+            <td><code>_compute_layer_means</code></td>
+            <td>Normalizes weight chunks according to tensor/channel/group/block quantization strategy, then averages per input channel.</td>
+          </tr>
+          <tr>
+            <td>Candidate scale</td>
+            <td><code>scales = x_mean.pow(ratio)</code> or <code>x_mean.pow(ratio) / w_mean.pow(1-ratio)</code></td>
+            <td>Grid search tests ratios across <code>n_grid</code>. <code>duo_scaling="both"</code> tries activation-only and activation+weight versions.</td>
+          </tr>
+          <tr>
+            <td>Error test</td>
+            <td><code>forward_quantize(..., "weight", ...)</code> then <code>_compute_loss</code></td>
+            <td>Temporarily quantizes scaled weights, re-runs the parent module, and picks the scale with lowest output MSE.</td>
+          </tr>
+          <tr>
+            <td>Apply result</td>
+            <td><code>_apply_smoothing</code></td>
+            <td>Multiplies downstream/balance layer weights by <code>s</code> and divides the smooth layer weight/bias by <code>s</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Where The Actual Quantization Happens</h2>
+      <p>
+        The qparams are not computed in AWQ. They are computed through observers in <code>src/llmcompressor/modifiers/quantization/calibration.py</code>.
+      </p>
+      <div class="flow">
+        <div class="step">
+          <div class="k">scheme</div>
+          <div class="t">apply_quantization_config</div>
+          <div class="d">Imported from compressed_tensors and called by <code>QuantizationMixin.initialize_quantization</code>.</div>
+        </div>
+        <div class="step">
+          <div class="k">observe</div>
+          <div class="t">initialize_observer</div>
+          <div class="d">Attaches weight/input/output observers to quantized modules.</div>
+        </div>
+        <div class="step">
+          <div class="k">stats</div>
+          <div class="t">observe()</div>
+          <div class="d">Feeds module weights or activations into observers.</div>
+        </div>
+        <div class="step">
+          <div class="k">qparams</div>
+          <div class="t">update_qparams()</div>
+          <div class="d">Calls <code>observer.get_qparams()</code> and stores scale / zero point on the module.</div>
+        </div>
+        <div class="step">
+          <div class="k">runtime/save</div>
+          <div class="t">forward_quantize / compress_model</div>
+          <div class="d">Low-level quantized math and packing come from compressed_tensors.</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Code Pointers</h2>
+      <table>
+        <thead>
+          <tr><th>Question</th><th>Look here</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>How do I call AWQ?</td>
+            <td><code>examples/awq/llama_example.py</code></td>
+          </tr>
+          <tr>
+            <td>Where are AWQ mappings for Llama/Qwen/Gemma/etc.?</td>
+            <td><code>src/llmcompressor/modifiers/transform/awq/mappings.py</code></td>
+          </tr>
+          <tr>
+            <td>Where does AWQ collect salient activation channels?</td>
+            <td><code>src/llmcompressor/modifiers/transform/awq/base.py</code>, <code>_setup_activation_cache_hooks</code></td>
+          </tr>
+          <tr>
+            <td>Where is AWQ's scale grid search?</td>
+            <td><code>src/llmcompressor/modifiers/transform/awq/base.py</code>, <code>_compute_best_scale</code></td>
+          </tr>
+          <tr>
+            <td>Where are weights actually rescaled?</td>
+            <td><code>src/llmcompressor/modifiers/transform/awq/base.py</code>, <code>_apply_smoothing</code></td>
+          </tr>
+          <tr>
+            <td>Where are quantization schemes attached?</td>
+            <td><code>src/llmcompressor/modifiers/quantization/quantization/mixin.py</code>, <code>initialize_quantization</code></td>
+          </tr>
+          <tr>
+            <td>Where are scale / zero point qparams computed?</td>
+            <td><code>src/llmcompressor/modifiers/quantization/calibration.py</code>, <code>update_qparams</code></td>
+          </tr>
+          <tr>
+            <td>Where is compressed checkpoint saving wired?</td>
+            <td><code>src/llmcompressor/transformers/compression/compressed_tensors_utils.py</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Bottom Line</h2>
+      <p>
+        If you are looking for "AWQ finding salient weights", read <code>AWQModifier._setup_activation_cache_hooks</code>, <code>_compute_layer_means</code>, and <code>_compute_best_scale</code>.
+        If you are looking for "actual quantization", read <code>QuantizationModifier.on_sequential_epoch_end</code> and <code>calibration.update_qparams</code>, then follow the imported <code>compressed_tensors</code> functions.
+      </p>
+    </section>
+  </main>
+</body>
+</html>
