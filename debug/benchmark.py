@@ -106,14 +106,37 @@ def summarize(values):
 def run_tokn(args) -> dict:
     from src.llm import LLM
     from utils.sampling_params import SamplingParams
+    from utils.configs import ServerConfigs
 
     prompts = load_questions(args.questions, args.num_prompts)
+
+    # Engine requires a config (it reads config.tensor_parallel_size and hands
+    # the config to each TP worker). Mirror serve.py's device handling: for
+    # TP>1 keep device "cuda" so each rank picks its own GPU; a pinned "cuda:N"
+    # would restrict every rank to a single device.
+    device = args.device
+    if device.startswith("cuda:") and args.tensor_parallel_size == 1:
+        os.environ["CUDA_VISIBLE_DEVICES"] = device.split(":", 1)[1]
+        device = "cuda:0"
+
+    cfg = ServerConfigs(
+        model=args.model,
+        dtype=args.dtype,                 # tokn expects "fp16" / "bf16"
+        device=device,
+        max_length=args.max_model_len,
+        max_model_len=args.max_model_len,
+        tensor_parallel_size=args.tensor_parallel_size,
+        enforce_eager=True,               # non-eager path is still buggy in tokn
+        max_num_seqs=TOKN_MAX_NUM_SEQS,
+        max_num_batched_tokens=TOKN_MAX_NUM_BATCHED_TOKENS,
+    )
 
     llm = LLM(
         model=args.model,
         dtype=args.dtype,                 # tokn expects "fp16" / "bf16"
-        device=args.device,
+        device=device,
         max_model_len=args.max_model_len,
+        config=cfg,
     )
 
     sampling = [
@@ -224,6 +247,7 @@ def run_vllm(args) -> dict:
         model=args.model,
         dtype=_VLLM_DTYPE.get(args.dtype, args.dtype),
         max_model_len=args.max_model_len,
+        tensor_parallel_size=args.tensor_parallel_size,
         # False lets vLLM use torch.compile / CUDA graph capture when available.
         enforce_eager=args.vllm_enforce_eager,
         # Match tokn feature set.
@@ -276,6 +300,7 @@ def _run_vllm_async(args, prompts) -> dict:
         model=args.model,
         dtype=_VLLM_DTYPE.get(args.dtype, args.dtype),
         max_model_len=args.max_model_len,
+        tensor_parallel_size=args.tensor_parallel_size,
         enforce_eager=args.vllm_enforce_eager,
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
@@ -366,6 +391,7 @@ def run_in_subprocess(framework: str, args) -> dict | None:
         "--device", args.device,
         "--max-tokens", str(args.max_tokens),
         "--max-model-len", str(args.max_model_len),
+        "--tensor-parallel-size", str(args.tensor_parallel_size),
         "--questions", args.questions,
         "--gpu-memory-utilization", str(args.gpu_memory_utilization),
         "--emit-json",
@@ -379,8 +405,13 @@ def run_in_subprocess(framework: str, args) -> dict | None:
     if args.vllm_enforce_eager:
         cmd += ["--vllm-enforce-eager"]
 
+    # tokn's TP>1 hangs without disabling NCCL P2P inside this container.
+    env = os.environ.copy()
+    if framework == "tokn" and args.tensor_parallel_size > 1:
+        env["NCCL_P2P_DISABLE"] = "1"
+
     print(f"\n=== Running {framework} in subprocess ({python_exe}) ===", flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
@@ -447,6 +478,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="cuda")
     p.add_argument("--max-tokens", type=int, default=256)
     p.add_argument("--max-model-len", type=int, default=2048)
+    p.add_argument("--tensor-parallel-size", type=int, default=1,
+                   help="Number of GPUs to shard the model across (TP). Use 2 for both A30s.")
     p.add_argument("--num-prompts", type=int, default=None, help="Limit number of prompts.")
     p.add_argument("--questions", default=os.path.join("data", "questions.jsonl"))
     p.add_argument("--request-rate", type=float, default=None,
