@@ -10,7 +10,7 @@ from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
 
 from utils.context import reset_context, set_context
-from qwen3 import Qwen3ForCausalLM
+from src.qwen3 import Qwen3ForCausalLM
 from utils.loader import load_model
 
 
@@ -25,13 +25,13 @@ from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
 
 from utils.context import reset_context, set_context
-from qwen3 import Qwen3ForCausalLM
+from src.qwen3 import Qwen3ForCausalLM
 from utils.loader import load_model
 
 
 from tqdm import tqdm
 from utils.sequence import Sequence
-from sampling_params import SamplingParams
+from utils.sampling_params import SamplingParams
 from src.block_manager import BlockManager
 from utils.request_state import RequestState
 from utils.context import get_context, reset_context, set_context
@@ -62,16 +62,28 @@ class Run:
         self.hf_config = AutoConfig.from_pretrained(self.config.model)
 
         backend = "nccl" if self.device.startswith("cuda") else "gloo"
-        dist.init_process_group(backend, "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         if self.device.startswith("cuda"):
             torch.cuda.set_device(rank)
+            dist.init_process_group(
+                backend,
+                "tcp://localhost:2333",
+                world_size=self.world_size,
+                rank=rank,
+                device_id=torch.device(f"cuda:{rank}"),
+            )
+        else:
+            dist.init_process_group(
+                backend,
+                "tcp://localhost:2333",
+                world_size=self.world_size,
+                rank=rank,
+            )
 
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(self.hf_config.dtype)
         torch.set_default_device("cuda" if self.device.startswith("cuda") else "cpu")
 
         self.custom_model = Qwen3ForCausalLM(self.hf_config)
-        self.load()
 
         self.outputs = {}
         self.max_model_len = self.config.max_model_len
@@ -134,14 +146,15 @@ class Run:
         self.block_size = 256
 
         num_layers = config.num_hidden_layers
-        num_kv_heads = config.num_key_value_heads
+        num_kv_heads = config.num_key_value_heads // self.world_size
 
         head_dim = getattr(config, 'head_dim', None) or config.hidden_size // config.num_attention_heads
 
         requested_num_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
 
         # Static sizing with headroom for multi-request batching.
-        self.num_blocks = max(1024, requested_num_blocks + 16)
+        max_num_seqs = max(1, getattr(self.config, "max_num_seqs", 1))
+        self.num_blocks = requested_num_blocks * max_num_seqs + 16
 
         logger.info(
             "KV cache sizing (static): max_model_len=%d, requested_blocks=%d, selected_blocks=%d",

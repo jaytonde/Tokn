@@ -10,7 +10,7 @@ from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
 
 from utils.context import reset_context, set_context
-from qwen3 import Qwen3ForCausalLM
+from src.qwen3 import Qwen3ForCausalLM
 from utils.loader import load_model
 
 
@@ -25,7 +25,7 @@ from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
 
 from utils.context import reset_context, set_context
-from qwen3 import Qwen3ForCausalLM
+from src.qwen3 import Qwen3ForCausalLM
 from utils.loader import load_model
 
 
@@ -33,7 +33,7 @@ from tqdm import tqdm
 
 from src.scheduler import Scheduler
 from utils.sequence import Sequence
-from sampling_params import SamplingParams
+from utils.sampling_params import SamplingParams
 from src.block_manager import BlockManager
 from utils.request_state import RequestState
 from utils.context import get_context, reset_context, set_context

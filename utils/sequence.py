@@ -1,6 +1,6 @@
 import time
 from itertools import count
-from sampling_params import SamplingParams
+from utils.sampling_params import SamplingParams
 
 class Sequence:
     counter = count()

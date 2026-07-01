@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from context import get_context
+from utils.context import get_context
 
 class VocabParallelEmbedding(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int):
