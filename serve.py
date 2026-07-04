@@ -46,8 +46,8 @@ _ensure_clean_cuda_libs()
 import torch.distributed as dist
 import uvicorn
 from fastapi_server import build_app
-from engine import Engine
-from configs import ServerConfigs
+from src.engine import Engine
+from utils.configs import ServerConfigs
 
 
 def main():
@@ -60,16 +60,13 @@ def main():
         gpu_index = device.split(":", 1)[1]
         os.environ["CUDA_VISIBLE_DEVICES"] = gpu_index
         device = "cuda:0"
-
-    if not dist.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "localhost")
-        os.environ.setdefault("MASTER_PORT", "29502")
-        dist.init_process_group(backend="nccl", rank=0, world_size=1)
+        cfg.device = device
 
     engine = Engine(
         model=cfg.model,
         dtype=cfg.dtype,
-        device=device
+        device=device,
+        config=cfg,
     )
     print("Engine instantiated..")
 

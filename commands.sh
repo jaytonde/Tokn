@@ -31,3 +31,9 @@ env -u LD_LIBRARY_PATH -u CUDA_HOME -u CUDA_PATH \
 	--questions data/questions.jsonl \
 	--num-prompts 400 \
 	--request-rate 2
+
+
+#Tensor Parallelism
+NCCL_P2P_DISABLE=1 python serve.py --model Qwen/Qwen3-0.6B --dtype bf16 \
+  --max_length 2048 --device cuda --tensor_parallel_size 2 \
+  --host 127.0.0.1 --port 8080 --enforce_eager
