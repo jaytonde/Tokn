@@ -21,7 +21,14 @@ Developing my own LLM Inference server like vLLM. To understand the core concept
 1. Speculative decoding
 2. Quantization
 
+## Summary
 While doing the developement of each of above major techniques. I compared the tokn with vLLM and logged the numbers for Throughtput, TTFT, TPOT, ITL etc.
+
+### Throughput
+![images](media/tokn_throughput.png)
+
+### Latency
+![images](media/tokn_latency.png)
 
 ---
 
