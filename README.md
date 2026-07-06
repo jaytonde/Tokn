@@ -1,46 +1,57 @@
-# Tokn
-LLM Inference server
-Developing my own LLM Inference server like vLLM. 
+# Tokn(LLM Inference server)
+![images](media/tokn_symbol.png)
+Developing my own LLM Inference server like vLLM. To understand the core concepts deeply by implementing them from scratch.
 
 ## Right now it supports
+
 1. Online and Offline mode.
 2. KV Caching
 3. Multiple requests processing.
-4. Scheduler to schedule requests.
+4. Requests scheduler.
 5. Seperate prefill and Decode.
-6. Prefix Caching
+6. Prefix caching
 7. Continuous batching
 8. Chunked prefill
+9. Torch compilation
+10. CUDA Graphs
+11. Distributed inference (TP)
 
-## Things are coming
+## Coming up
+
+1. Speculative decoding
+2. Quantization
+
+## Summary
+While doing the developement of each of above major techniques. I compared the tokn with vLLM and logged the numbers for Throughtput, TTFT, TPOT, ITL etc.
+
+### Throughput
+![images](media/tokn_throughput.png)
+
+### Latency
+![images](media/tokn_latency.png)
+
+---
+
+## Benchmarks: tokn vs. vLLM
+
+My first log after doing some core techniques implementation. I randomly benchmarked tokn with vLLM on 102 prompt.
+
+| total request |	tokn	| vLLM |
+| --- | --- | --- |
+| 102 | 457 tok/sec | 30,000 tok/sec |
 
 
-1. Torch compilation
-2. CUDA Graphs
-3. Speculative decoding
-4. Quantization
-5. Distributed inference
-   etc.
+---
 
-
-## Current State
-
-![image](llm_benchmarks.png)
-
-|total request | tokn | vLLM |
-|----|----|----|
-| 102 | 457 tok/sec | 30,000 tok/sec|
-
-
-
-# tokn
-
-## Benchmark: tokn vs. vLLM
-
+From this point on I generated proper synthetic dataset to benchmark tokn properly with vLLM.
 400 prompts (mixed lengths), Qwen3-0.6B, `bf16`, `max_tokens=256`, `max_model_len=2048`, greedy decoding.
 
-Enabled on both: **prefix caching**, **chunked prefill**.
-Disabled on both: **continuous batching**, **`torch.compile`**, **CUDA graphs**.
+
+## 1. First Log
+
+### Techniques Added: 
+- **prefix caching**
+- **chunked prefill**.
 
 ### Throughput
 
@@ -62,14 +73,13 @@ vLLM is **1.41×** tokn throughput.
 | vLLM | TPOT | 11.09 | 11.08 | 11.20 |
 | vLLM | ITL | 11.09 | 11.08 | 11.20 |
 
-TTFT = time to first token, TPOT = time per output token, ITL = inter-token latency.
 
-## Benchmark After Adding Continuous Batching
 
-400 prompts (mixed lengths), Qwen3-0.6B, `bf16`, `max_tokens=256`, `max_model_len=2048`, greedy decoding.
+## 2. Second log
 
-Enabled on both: **continuous batching**, **prefix caching**, **chunked prefill**.
-Disabled on both: **`torch.compile`**, **CUDA graphs**.
+### Techniques Added:
+- **Continuous batching**
+
 
 ### Throughput
 
@@ -91,45 +101,11 @@ vLLM is **1.48×** tokn throughput.
 | vLLM | TPOT | 11.35 | 11.34 | 11.55 |
 | vLLM | ITL | 11.35 | 11.34 | 11.55 |
 
-TTFT = time to first token, TPOT = time per output token, ITL = inter-token latency.
 
-## Benchmark After Adding Continuous Batching + Staggered Arrivals (`--request-rate 2`)
+## 3. Third Log
 
-400 prompts (mixed lengths), Qwen3-0.6B, `bf16`, `max_tokens=256`, `max_model_len=2048`, greedy decoding.
-
-Enabled on both: **continuous batching**, **prefix caching**, **chunked prefill**.
-Disabled on both: **`torch.compile`**, **CUDA graphs**.
-Arrival pattern: **Poisson, 2 req/s** (measures real serving latency, not burst queue time).
-
-### Throughput
-
-| Framework | Prompts | Output tokens | Elapsed (s) | Throughput (tok/s) |
-| --- | ---: | ---: | ---: | ---: |
-| tokn | 400 | 97,307 | 337.669 | 288.17 |
-| vLLM | 400 | 97,374 | 226.517 | 429.87 |
-
-vLLM is **1.49×** tokn throughput.
-
-### Latency (ms)
-
-| Framework | Metric | mean | p50 | p99 |
-| --- | --- | ---: | ---: | ---: |
-| tokn | TTFT | **33.02** | **19.16** | **127.00** |
-| tokn | TPOT | 448.71 | 530.26 | 680.74 |
-| tokn | ITL | 449.84 | 490.79 | 804.41 |
-| vLLM | TTFT | 7,912.78 | 8,143.72 | 17,590.04 |
-| vLLM | TPOT | **11.08** | **11.08** | **11.13** |
-| vLLM | ITL | **11.08** | **11.08** | **11.13** |
-
-TTFT = time to first token, TPOT = time per output token, ITL = inter-token latency.
-
-## Benchmark After Adding `torch.compile` + Staggered Arrivals (`--request-rate 2`)
-
-400 prompts (mixed lengths), Qwen3-0.6B, `bf16`, `max_tokens=256`, `max_model_len=2048`, greedy decoding.
-
-Enabled on both: **continuous batching**, **prefix caching**, **chunked prefill**, **`torch.compile`**.
-Enabled on vLLM: **CUDA graphs**.
-Arrival pattern: **Poisson, 2 req/s** (measures real serving latency, not burst queue time).
+### Techniques Added:
+- torch.compile
 
 ### Throughput
 
@@ -153,4 +129,29 @@ vLLM is **1.67x** tokn throughput.
 
 TTFT = time to first token, TPOT = time per output token, ITL = inter-token latency.
 
+
+## 4. Fourth Log
+
+### Techniques Added:
+- CUDA Graphs
+
+### Throughput
+
+| Framework | Prompts | Output tokens | Elapsed (s) | Throughput (tok/s) |
+| --- | ---: | ---: | ---: | ---: |
+| tokn | 400 | 97,003 | 214.540 | 452.14 |
+| vLLM | 400 | 96,924 | 210.451 | 460.55 |
+
+vLLM is **1.02×** tokn throughput.
+
+### Latency (ms)
+
+| Framework | Metric | mean | p50 | p99 |
+| --- | --- | ---: | ---: | ---: |
+| tokn | TTFT | 22.01 | 20.30 | 44.39 |
+| tokn | TPOT | 4.20 | 4.15 | 6.11 |
+| tokn | ITL | 4.20 | 4.00 | 8.33 |
+| vLLM | TTFT | 15.70 | 16.48 | 28.30 |
+| vLLM | TPOT | 1.65 | 1.62 | 3.38 |
+| vLLM | ITL | 1.65 | 1.62 | 3.38 |
 
