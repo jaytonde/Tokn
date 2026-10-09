@@ -8,6 +8,8 @@
 | 1 | CUDA-graph decode fix (block_table padding) + enable graphs | 441.89 | 242.09 | 7.51 | 0.97x |
 | 2 | fused Triton RoPE kernel | 446.12 | 116.36 | 6.03 | 0.97x |
 | 3 | threaded run_loop step + RMSNorm tail fusion + lm_head-in-graph + sync removal | 456.57 | 94.27 | 5.53 | 0.997x |
+| 4 | drop GPU round-trip in add_async_request tokenization | 456.70 | 95.77 | 5.53 | 0.998x |
+| 5 | fuse RMSNorm convert+residual-add, fold rsqrt into tail | 459.59 | 61.06 | 4.66 | 1.004x  MILESTONE (beats vLLM) |
 | - | vLLM 0.31.0 target (this machine, 2026-10-09) | 457.86 | 17.87 | 3.18 | 1.00x |
 
 ## Experiments tried
@@ -17,6 +19,8 @@
 | 1 | CUDA-graph decode not bit-identical to eager -> root-caused to block_table width (eager (1,nblocks) vs graph (1,8) padded); pad both to max_num_blocks | graphs | KEPT | +320.4 | flash_attn_with_kvcache yields different results for padded vs unpadded block_table at seqlen>=256; matching shapes makes graph bit-identical |
 | 2 | Fused Triton RoPE (7 torch kernels -> 1), elementwise fp32 + single bf16 round | kernel | KEPT | +4.2 | bit-identical to torch; graph replay 6.17->4.87 ms, TPOT 7.51->6.03 |
 | 3 | Threaded run_loop step (submission starvation) + RMSNorm tail fusion + lm_head in graph + GPU slot mapping | sync/compile | KEPT | +10.4 | run_loop's blocking step starved the submission coroutine; arrivals drifted ~5.6s late -> 217s. Threaded step + faster decode -> 212s |
+| 4 | Drop GPU round-trip in add_async_request tokenization | sync | KEPT | +0.1 | tokenizer ids moved to CUDA and back for no reason; also put a GPU sync on the submission path. sum_submit 0.85->0.30s |
+| 5 | Fuse RMSNorm convert+residual-add, fold rsqrt into tail (tl.rsqrt == torch.rsqrt) | kernel | KEPT | +2.9 | RMSNorm ~7->4 kernels/call; graph replay 4.65->3.84ms; TPOT 5.53->4.66ms. First time beats vLLM (MILESTONE) |
 
 ## Details
 
@@ -87,6 +91,19 @@
 
 ## [8] 2026-10-09 14:50  Scheduler: refill freed slots immediately (KEPT, no measured gain)
 - should_decode_first now allows a prefill when running < max_num_seqs and requests are waiting, instead of waiting out prefill_interval=8. Benchmarked neutral on its own; kept as it improved max batch 4->5 in the tight-loop driver.
+
+## [9] 2026-10-09 16:40  Fuse RMSNorm convert+residual-add and fold rsqrt into tail (KEPT, MILESTONE)
+- Hypothesis and expected gain: RMSNorm was still ~7 kernels/call (x.float, residual.float, add, res.to(bf16), pow, mean, rsqrt, tail). Folding the rsqrt into the Triton tail and fusing the convert+add cuts it to ~4 kernels -> ~0.8ms/step.
+- Profile evidence: eagerprof showed reduce_kernel + unrolled_elementwise + 3x vectorized_elementwise at 565 calls/step (the RMSNorm var computation) ~1.1ms/step.
+- Key discovery: tl.rsqrt is bit-identical to torch.rsqrt (unlike 1/tl.sqrt which differs by 1 ULP), so inv = tl.rsqrt(var+eps) can be computed inside the tail kernel.
+- Change: layers/layernorm.py - convert_add_kernel (x.to(f32) [+ r.to(f32)], res=round_bf16) + rms_scale_kernel takes var and computes inv via tl.rsqrt. var still computed in torch (bit-identical reduction).
+- Correctness: PASS - 0/37 vs pre-change reference at bs=1; graph bs=1 0/37; batched deterministic 0/37.
+- Benchmark before: 456.70 tok/s, TTFT 95.77/1001, TPOT 5.53/6.00
+- Benchmark after: 459.59 tok/s (459.19 confirm), TTFT 61.06/611.76, TPOT 4.66/5.19, ITL 4.66/5.35
+- Gap to vLLM now: throughput 1.004x (MILESTONE - first time beating vLLM), TPOT 1.47x, TTFT 3.4x
+- Outcome: KEPT
+- Why it worked: folding the (bit-identical) rsqrt into the tail and fusing the elementwise convert+add removed ~3 kernels x 113 RMSNorm calls/step.
+- Worth retrying? NO.
 
 ## Backlog
 
