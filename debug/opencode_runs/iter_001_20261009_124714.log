@@ -1,0 +1,1635 @@
+[0m
+> tokn-optimizer · deepseek-v4-flash-0731
+[0m
+[0m✗ [0mRead OPTIMIZATION_LOG.md failed
+[91m[1mError: [0mFile not found: /home/Tokn/OPTIMIZATION_LOG.md
+[0m
+[0m$ [0mgit log --oneline -30
+70c3494 Fix KV-exhaustion hang; add optimizer agent and loop
+4d48fb5 env support code removed LD_LIBRARY path
+52fa3cb Merge branch 'main' of https://github.com/jaytonde/Tokn
+ea15ff5 bug temp fix
+7100a26 images added
+a8f6acf benchmarks added
+6461540 updated
+86370f5 updated
+2f24616 updated
+61dceab Merge branch 'main' of https://github.com/jaytonde/Tokn
+d992dbc updated README.md
+f0aec2d updated
+4551d8d working tp
+fb3d943 tp implemented
+2ef08c3 code refactoring
+fc2dcc6 deleted elliot references
+f49c70f code refactoring
+05aee50 typo fix
+c062591 Merge branch 'main' of https://github.com/jaytonde/Tokn
+068af1e torch.compile and cuda graphs implemented
+8be3fc3 Update README.md
+01ee290 Added continuous batching, prefix caching and chunked prefill
+a37ef03 Update README.md
+4336f00 Update README.md
+06fe158 Update README.md
+2e34761 Update README.md
+6114e88 image added
+53d8745 Update README.md
+4ec4d2c Working Scheduler
+3fe9158 scheduler is working now
+[0m
+[0m$ [0mls -la /home/Tokn; echo "---SRC---"; ls -la /home/Tokn/src; echo "---DEBUG---"; ls -la /home/Tokn/debug; echo "---EXPERIMENTS---"; ls -la /home/Tokn/experiments 2>/dev/null || echo "no experiments dir"
+total 56
+drwxr-xr-x 14 root root  4096 Oct  9 12:44 .
+drwxr-xr-x 16 root root   299 Oct  9 11:36 ..
+drwxr-xr-x  8 root root   218 Oct  9 12:47 .git
+-rw-r--r--  1 root root    71 Oct  9 09:35 .gitignore
+drwxr-xr-x  4 root root    58 Oct  9 12:47 .opencode
+drwxr-xr-x  5 root root   123 Oct  9 09:38 .venv
+drwxr-xr-x  6 root root   139 Oct  9 10:01 .venv-vllm
+drwxr-xr-x  2 root root    46 Oct  9 09:35 .vscode
+-rw-r--r--  1 root root  3981 Oct  9 09:35 README.md
+-rw-r--r--  1 root root   141 Oct  9 09:35 __init__.py
+drwxr-xr-x  2 root root    73 Oct  9 09:39 __pycache__
+-rw-r--r--  1 root root  1336 Oct  9 11:59 commands.sh
+drwxr-xr-x  2 root root    66 Oct  9 09:35 data
+drwxr-xr-x  4 root root    88 Oct  9 12:45 debug
+-rw-r--r--  1 root root   842 Oct  9 09:35 fastapi_server.py
+drwxr-xr-x  3 root root   169 Oct  9 09:39 layers
+-rw-r--r--  1 root root 15540 Oct  9 09:35 llm-compressor-awq-explainer.html
+drwxr-xr-x  2 root root   106 Oct  9 09:35 media
+-rw-r--r--  1 root root  3710 Oct  9 12:44 optimize_loop.sh
+-rw-r--r--  1 root root    33 Oct  9 09:35 requirements.txt
+-rw-r--r--  1 root root   868 Oct  9 09:35 serve.py
+drwxr-xr-x  3 root root   130 Oct  9 12:14 src
+-rw-r--r--  1 root root  3302 Oct  9 12:44 tokn_status.sh
+drwxr-xr-x  3 root root   163 Oct  9 09:39 utils
+---SRC---
+total 64
+drwxr-xr-x  3 root root   130 Oct  9 12:14 .
+drwxr-xr-x 14 root root  4096 Oct  9 12:44 ..
+drwxr-xr-x  2 root root   189 Oct  9 12:14 __pycache__
+-rw-r--r--  1 root root 10543 Oct  9 12:14 block_manager.py
+-rw-r--r--  1 root root  8142 Oct  9 12:14 engine.py
+-rw-r--r--  1 root root   110 Oct  9 09:35 llm.py
+-rw-r--r--  1 root root  7284 Oct  9 09:35 qwen3.py
+-rw-r--r--  1 root root 16639 Oct  9 11:21 run.py
+-rw-r--r--  1 root root  5460 Oct  9 12:14 scheduler.py
+---DEBUG---
+total 52
+drwxr-xr-x  4 root root    88 Oct  9 12:45 .
+drwxr-xr-x 14 root root  4096 Oct  9 12:44 ..
+drwxr-xr-x  2 root root    39 Oct  9 12:14 __pycache__
+-rw-r--r--  1 root root 20639 Oct  9 12:14 benchmark.py
+-rw-r--r--  1 root root 20598 Oct  9 09:35 debug_serve.py
+drwxr-xr-x  2 root root    42 Oct  9 12:47 opencode_runs
+---EXPERIMENTS---
+no experiments dir
+[0m
+[0m$ [0mgit status; echo "---"; git log --oneline -5 --all
+On branch main
+Your branch is ahead of 'origin/main' by 1 commit.
+  (use "git push" to publish your local commits)
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	debug/opencode_runs/
+
+nothing added to commit but untracked files present (use "git add" to track)
+---
+70c3494 Fix KV-exhaustion hang; add optimizer agent and loop
+4d48fb5 env support code removed LD_LIBRARY path
+52fa3cb Merge branch 'main' of https://github.com/jaytonde/Tokn
+ea15ff5 bug temp fix
+7100a26 images added
+[0m
+The optimization log doesn't exist yet — I need to create it with the baseline from the facts. Let me first explore the repo structure and key files.
+[0m→ [0mRead src/run.py
+[0m→ [0mRead src/engine.py
+No log exists yet. Let me read the key source files to understand the current state.
+[0m→ [0mRead debug/benchmark.py
+[0m→ [0mRead src/scheduler.py
+[0m→ [0mRead src/qwen3.py
+[0m
+[0m$ [0mls -la /home/Tokn/layers /home/Tokn/utils; echo "---README---"; cat /home/Tokn/README.md
+/home/Tokn/layers:
+total 36
+drwxr-xr-x  3 root root  169 Oct  9 09:39 .
+drwxr-xr-x 14 root root 4096 Oct  9 12:44 ..
+drwxr-xr-x  2 root root  210 Oct  9 09:39 __pycache__
+-rw-r--r--  1 root root  504 Oct  9 09:35 activation.py
+-rw-r--r--  1 root root 2852 Oct  9 09:35 attention.py
+-rw-r--r--  1 root root 2780 Oct  9 09:35 embed_head.py
+-rw-r--r--  1 root root 1354 Oct  9 09:35 layernorm.py
+-rw-r--r--  1 root root 5281 Oct  9 09:35 linear.py
+-rw-r--r--  1 root root 2180 Oct  9 09:35 rotary_embedding.py
+-rw-r--r--  1 root root  927 Oct  9 09:35 sampler.py
+
+/home/Tokn/utils:
+total 32
+drwxr-xr-x  3 root root  163 Oct  9 09:39 .
+drwxr-xr-x 14 root root 4096 Oct  9 12:44 ..
+drwxr-xr-x  2 root root  235 Oct  9 09:39 __pycache__
+-rw-r--r--  1 root root  393 Oct  9 09:35 block.py
+-rw-r--r--  1 root root 2089 Oct  9 09:35 configs.py
+-rw-r--r--  1 root root 1381 Oct  9 09:35 context.py
+-rw-r--r--  1 root root 1190 Oct  9 09:35 loader.py
+-rw-r--r--  1 root root  225 Oct  9 09:35 request_state.py
+-rw-r--r--  1 root root  164 Oct  9 09:35 sampling_params.py
+-rw-r--r--  1 root root 1971 Oct  9 09:35 sequence.py
+---README---
+# Tokn(LLM Inference server)
+![images](media/tokn_symbol.png)
+Developing my own LLM Inference server like vLLM. To understand the core concepts deeply by implementing them from scratch.
+
+## Right now it supports
+
+1. Online and Offline mode.
+2. KV Caching
+3. Multiple requests processing.
+4. Requests scheduler.
+5. Seperate prefill and Decode.
+6. Prefix caching
+7. Continuous batching
+8. Chunked prefill
+9. Torch compilation
+10. CUDA Graphs
+11. Distributed inference (TP)
+
+## Coming up
+
+1. Speculative decoding
+2. Quantization
+
+## Summary
+While doing the developement of each of above major techniques. I compared the tokn with vLLM and logged the numbers for Throughtput, TTFT, TPOT, ITL etc.
+
+### Throughput
+![images](media/tokn_throughput.png)
+
+### Latency
+![images](media/tokn_latency.png)
+
+---
+
+## Benchmarks: tokn vs. vLLM
+
+My first log after doing some core techniques implementation. I randomly benchmarked tokn with vLLM on 102 prompt.
+
+| total request |	tokn	| vLLM |
+| --- | --- | --- |
+| 102 | 457 tok/sec | 30,000 tok/sec |
+
+
+---
+
+From this point on I generated proper synthetic dataset to benchmark tokn properly with vLLM.
+400 prompts (mixed lengths), Qwen3-0.6B, `bf16`, `max_tokens=256`, `max_model_len=2048`, greedy decoding.
+
+
+## 1. First Log
+
+### Techniques Added: 
+- **prefix caching**
+- **chunked prefill**.
+
+### Throughput
+
+| Framework | Prompts | Output tokens | Elapsed (s) | Throughput (tok/s) |
+| --- | --- | --- | --- | --- |
+| tokn | 400 | 97,271 | 324.767 | 299.51 |
+| vLLM | 400 | 97,367 | 230.673 | 422.10 |
+
+vLLM is **1.41×** tokn throughput.
+
+### Latency (ms)
+
+| Framework | Metric | mean | p50 | p99 |
+| --- | --- | --- | --- | --- |
+| tokn | TTFT | 1428.04 | 1436.82 | 2266.79 |
+| tokn | TPOT | 1272.70 | 1265.89 | 1332.04 |
+| tokn | ITL | 1270.39 | 1313.34 | 1336.92 |
+| vLLM | TTFT | 38.68 | 35.38 | 48.11 |
+| vLLM | TPOT | 11.09 | 11.08 | 11.20 |
+| vLLM | ITL | 11.09 | 11.08 | 11.20 |
+
+
+
+## 2. Second log
+
+### Techniques Added:
+- **Continuous batching**
+
+
+### Throughput
+
+| Framework | Prompts | Output tokens | Elapsed (s) | Throughput (tok/s) |
+| --- | ---: | ---: | ---: | ---: |
+| tokn | 400 | 97,271 | 332.574 | 292.48 |
+| vLLM | 400 | 97,380 | 225.318 | 432.19 |
+
+vLLM is **1.48×** tokn throughput.
+
+### Latency (ms)
+
+| Framework | Metric | mean | p50 | p99 |
+| --- | --- | ---: | ---: | ---: |
+| tokn | TTFT | 6,838.45 | 6,854.68 | 13,074.27 |
+| tokn | TPOT | 1,265.68 | 1,265.10 | 1,347.11 |
+| tokn | ITL | 1,263.50 | 1,330.38 | 1,369.50 |
+| vLLM | TTFT | 109,782.67 | 109,391.16 | 217,906.05 |
+| vLLM | TPOT | 11.35 | 11.34 | 11.55 |
+| vLLM | ITL | 11.35 | 11.34 | 11.55 |
+
+
+## 3. Third Log
+
+### Techniques Added:
+- torch.compile
+
+### Throughput
+
+| Framework | Prompts | Output tokens | Elapsed (s) | Throughput (tok/s) |
+| --- | ---: | ---: | ---: | ---: |
+| tokn | 400 | 97,686 | 354.395 | 275.64 |
+| vLLM | 400 | 96,959 | 210.419 | 460.79 |
+
+vLLM is **1.67x** tokn throughput.
+
+### Latency (ms)
+
+| Framework | Metric | mean | p50 | p99 |
+| --- | --- | ---: | ---: | ---: |
+| tokn | TTFT | 43.19 | 19.93 | 141.94 |
+| tokn | TPOT | 500.39 | 592.36 | 728.12 |
+| tokn | ITL | 501.01 | 541.41 | 876.72 |
+| vLLM | TTFT | 15.90 | 16.69 | 28.63 |
+| vLLM | TPOT | 1.62 | 1.60 | 3.37 |
+| vLLM | ITL | 1.62 | 1.60 | 3.37 |
+
+TTFT = time to first token, TPOT = time per output token, ITL = inter-token latency.
+
+
+## 4. Fourth Log
+
+### Techniques Added:
+- CUDA Graphs
+
+### Throughput
+
+| Framework | Prompts | Output tokens | Elapsed (s) | Throughput (tok/s) |
+| --- | ---: | ---: | ---: | ---: |
+| tokn | 400 | 97,003 | 214.540 | 452.14 |
+| vLLM | 400 | 96,924 | 210.451 | 460.55 |
+
+vLLM is **1.02×** tokn throughput.
+
+### Latency (ms)
+
+| Framework | Metric | mean | p50 | p99 |
+| --- | --- | ---: | ---: | ---: |
+| tokn | TTFT | 22.01 | 20.30 | 44.39 |
+| tokn | TPOT | 4.20 | 4.15 | 6.11 |
+| tokn | ITL | 4.20 | 4.00 | 8.33 |
+| vLLM | TTFT | 15.70 | 16.48 | 28.30 |
+| vLLM | TPOT | 1.65 | 1.62 | 3.38 |
+| vLLM | ITL | 1.65 | 1.62 | 3.38 |
+[0m
+[0m$ [0mcat /home/Tokn/layers/attention.py /home/Tokn/layers/layernorm.py /home/Tokn/layers/activation.py /home/Tokn/layers/rotary_embedding.py /home/Tokn/layers/embed_head.py /home/Tokn/layers/linear.py
+import torch
+from torch import nn
+import triton
+import triton.language as tl
+
+from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+from utils.context import get_context
+
+
+@triton.jit
+def store_kvcache_kernel(
+    key_ptr,
+    key_stride,
+    value_ptr,
+    value_stride,
+    k_cache_ptr,
+    v_cache_ptr,
+    slot_mapping_ptr,
+    D: tl.constexpr,
+):
+    idx = tl.program_id(0)
+    slot = tl.load(slot_mapping_ptr + idx)
+    if slot == -1: return
+    key_offsets = idx * key_stride + tl.arange(0, D)
+    value_offsets = idx * value_stride + tl.arange(0, D)
+    key = tl.load(key_ptr + key_offsets)
+    value = tl.load(value_ptr + value_offsets)
+    cache_offsets = slot * D + tl.arange(0, D)
+    tl.store(k_cache_ptr + cache_offsets, key)
+    tl.store(v_cache_ptr + cache_offsets, value)
+
+
+def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
+    N, num_heads, head_dim = key.shape
+    D = num_heads * head_dim
+    assert key.stride(-1) == 1 and value.stride(-1) == 1
+    assert key.stride(1) == head_dim and value.stride(1) == head_dim
+    assert k_cache.stride(1) == D and v_cache.stride(1) == D
+    assert slot_mapping.numel() == N
+    store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
+
+
+class Attention(nn.Module):
+
+    def __init__(
+        self,
+        num_heads,
+        head_dim,
+        scale,
+        num_kv_heads,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.scale = scale
+        self.num_kv_heads = num_kv_heads
+        self.k_cache = self.v_cache = torch.tensor([])
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        context = get_context()
+        k_cache, v_cache = self.k_cache, self.v_cache
+        if k_cache.numel() and v_cache.numel():
+            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+        if context.is_prefill:
+            if context.block_tables is not None:    # prefix cache
+                k, v = k_cache, v_cache
+            o = flash_attn_varlen_func(q, k, v,
+                                       max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
+                                       max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
+                                       softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+        else:    # decode
+            o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
+                                        cache_seqlens=context.context_lens, block_table=context.block_tables, 
+                                        softmax_scale=self.scale, causal=True)
+
+            o = o.squeeze(1)
+            
+        return o
+import torch
+from torch import nn
+
+class RMSNorm(nn.Module):
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps    = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+
+    def rms_forward(self, x: torch.Tensor) -> torch.Tensor:
+        orig_dtype = x.dtype
+        x          = x.float()
+        var        = x.pow(2).mean(dim=-1, keepdim=True) #sqrt(mean(x^2))
+        x.mul_(torch.rsqrt(var + self.eps))  #Scales x by 1 / sqrt(var + eps).
+        x          = x.to(orig_dtype).mul_(self.weight) #multiplies elementwise by self.weight, which is a learnable scaling parameter.
+        return x
+
+    def add_rms_forward(self, x: torch.Tensor, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        orig_dtype = x.dtype
+        x          = x.float().add_(residual.float())
+        residual   = x.to(orig_dtype)
+        var        = x.pow(2).mean(dim=-1, keepdim=True) 
+        x.mul_(torch.rsqrt(var + self.eps))
+        x          = x.to(orig_dtype).mul_(self.weight) 
+        return x, residual
+
+    def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            return self.rms_forward(x)
+        else:
+            return self.add_rms_forward(x, residual)import torch
+from torch import nn
+import torch.nn.functional as F
+
+class SiluAndMul(nn.Module):
+    """
+    split into two halves
+    nonlinearly activate one half
+    use the other half as a gate
+    multiply them elementwise
+    """
+
+    @torch.compile
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, y = x.chunk(2, -1) #splits it into two equal parts along the last dimension
+        return F.silu(x) * y #One half is the “activation” branch, the other is the “gate” branch.from functools import lru_cache
+import torch
+from torch import nn
+
+
+def apply_rotary_emb(
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor
+) -> torch.Tensor:
+    """
+    This code implements RoPE, or rotary positional embeddings, 
+    for transformer attention.This is how position information 
+    gets mixed into query/key vectors without adding a separate 
+    position embedding tensor
+    """
+    x1, x2 = torch.chunk(x.float(), 2, dim=-1) #splits the last dimension of x into two halves
+    y1 = x1 * cos - x2 * sin #applies a 2D rotation using cos and sin
+    y2 = x2 * cos + x1 * sin #applies a 2D rotation using cos and sin
+
+    return torch.cat((y1, y2), dim=-1).to(x.dtype)
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self,
+                 head_size: int,
+                 rotary_dim: int,
+                 max_postiona_embeddings: int,
+                 base: float) -> None:
+        super().__init__()
+        self.head_size = head_size
+        assert rotary_dim == head_size
+        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float)/ rotary_dim)) #torch.arange(0, rotary_dim, 2, dtype=torch.float) creates 0, 2, 4, ... up to rotary_dim - 2.It steps by 2 because RoPE works on pairs of dimensions.
+        t = torch.arange(max_postiona_embeddings, dtype=torch.float)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1).unsqueeze_(1)
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+
+    def forward(self,
+                positions: torch.Tensor,
+                query: torch.Tensor,
+                key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        cos_sin = self.cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        query = apply_rotary_emb(query, cos, sin)
+        key = apply_rotary_emb(key, cos, sin)
+        return query, key
+    
+
+def get_rope(
+        head_size: int,
+        rotary_dim: int,
+        max_postion: int,
+        base: float):
+    rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_postion, base)
+    return rotary_emb
+import torch
+from torch import nn
+import torch.nn.functional as F
+import torch.distributed as dist
+from utils.context import get_context
+
+class VocabParallelEmbedding(nn.Module):
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        super().__init__()
+        self.tp_rank                    = dist.get_rank()
+        self.tp_size                    = dist.get_world_size()
+        assert num_embeddings % self.tp_size == 0
+        self.num_embeddings             = num_embeddings
+        self.num_embeddings_per_partion = self.num_embeddings // self.tp_size
+        self.vocab_start_idx            = self.num_embeddings_per_partion * self.tp_rank
+        self.vocab_end_idx              = self.vocab_start_idx + self.num_embeddings_per_partion
+        self.weight                     = nn.Parameter(torch.empty(self.num_embeddings_per_partion, embedding_dim))
+        self.weight.weight_loader       = self.weight_loader
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        param_data = param.data
+        shard_size = param_data.size(0)
+        start_idx = self.tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(0, start_idx, shard_size) #Extracts only the chunk for this rank from the full loaded weight tensor.
+        param_data.copy_(loaded_weight) #Copies that shard into the local parameter.
+
+    def forward(self, x: torch.Tensor):
+        if self.tp_size > 1:
+            mask = (x >= self.vocab_start_idx) & (x < self.vocab_end_idx)
+            x = mask * (x - self.vocab_start_idx)
+
+        y = F.embedding(x, self.weight)
+
+        if self.tp_size > 1:
+            y = mask.unsqueeze(1) * y
+            dist.all_reduce(y)
+        return y
+
+class ParallelLMHead(VocabParallelEmbedding):
+    """
+    this module computes next-token logits from hidden states, 
+    optimizes prefill by keeping only last-token hidden states, 
+    and reconstructs full vocabulary logits from tensor-parallel shards on rank 0
+    """
+    def __init__(self, num_embeddings: int, embedding_dim: int, bias: bool = False):
+        assert not bias
+        super().__init__(num_embeddings, embedding_dim)
+
+    def forward(self, x: torch.Tensor):
+        context = get_context()
+
+        if context.is_prefill:
+            last_indices = context.cu_seqlens_q[1:] - 1
+            x = x[last_indices].contiguous()
+
+        logits = F.linear(x, self.weight)
+
+        if self.tp_size > 1:
+            #with tp_size > 1: full logits only on rank 0, None on other ranks
+
+            all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None
+            dist.gather(logits, all_logits, 0)
+            logits = torch.cat(all_logits, -1) if self.tp_rank == 0 else None
+
+        return logits
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+import torch.distributed as dist
+
+
+def divide(numerator, denominator):
+    assert numerator % denominator == 0
+    return numerator // denominator
+
+
+class LinearBase(nn.Module):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = False,
+        tp_dim: int | None = None,
+    ):
+        super().__init__()
+        self.tp_dim = tp_dim
+        self.tp_rank = dist.get_rank()
+        self.tp_size = dist.get_world_size()
+        self.weight = nn.Parameter(torch.empty(output_size, input_size))
+        self.weight.weight_loader = self.weight_loader
+        if bias:
+            self.bias = nn.Parameter(torch.empty(output_size))
+            self.bias.weight_loader = self.weight_loader
+        else:
+            self.register_parameter("bias", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class ReplicatedLinear(LinearBase):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = False,
+    ):
+        super().__init__(input_size, output_size, bias)
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        param.data.copy_(loaded_weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight, self.bias)
+
+
+class ColumnParallelLinear(LinearBase):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = False,
+    ):
+        tp_size = dist.get_world_size()
+        super().__init__(input_size, divide(output_size, tp_size), bias, 0)
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        param_data = param.data
+        shard_size = param_data.size(self.tp_dim)
+        start_idx = self.tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
+        param_data.copy_(loaded_weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight, self.bias)
+
+
+class MergedColumnParallelLinear(ColumnParallelLinear):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        bias: bool = False,
+    ):
+        self.output_sizes = output_sizes
+        super().__init__(input_size, sum(output_sizes), bias)
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int):
+        param_data = param.data
+        shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+        shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+        param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
+        loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
+        param_data.copy_(loaded_weight)
+
+
+class QKVParallelLinear(ColumnParallelLinear):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        head_size: int,
+        total_num_heads: int,
+        total_num_kv_heads: int | None = None,
+        bias: bool = False,
+    ):
+        tp_size = dist.get_world_size()
+        total_num_kv_heads = total_num_kv_heads or total_num_heads
+        self.head_size = head_size
+        self.num_heads = divide(total_num_heads, tp_size)
+        self.num_kv_heads = divide(total_num_kv_heads, tp_size)
+        output_size = (total_num_heads + 2 * total_num_kv_heads) * self.head_size
+        super().__init__(hidden_size, output_size, bias)
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
+        param_data = param.data
+        assert loaded_shard_id in ["q", "k", "v"]
+        if loaded_shard_id == "q":
+            shard_size = self.num_heads * self.head_size
+            shard_offset = 0
+        elif loaded_shard_id == "k":
+            shard_size = self.num_kv_heads * self.head_size
+            shard_offset = self.num_heads * self.head_size
+        else:
+            shard_size = self.num_kv_heads * self.head_size
+            shard_offset = self.num_heads * self.head_size + self.num_kv_heads * self.head_size
+        param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
+        loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
+        param_data.copy_(loaded_weight)
+
+
+class RowParallelLinear(LinearBase):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = False,
+    ):
+        tp_size = dist.get_world_size()
+        super().__init__(divide(input_size, tp_size), output_size, bias, 1)
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        param_data = param.data
+        if param_data.ndim == 1:
+            param_data.copy_(loaded_weight)
+            return
+        shard_size = param_data.size(self.tp_dim)
+        start_idx = self.tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
+        param_data.copy_(loaded_weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
+        if self.tp_size > 1:
+            dist.all_reduce(y)
+        return y
+[0m
+[0m$ [0mcat /home/Tokn/utils/context.py /home/Tokn/utils/sequence.py /home/Tokn/utils/configs.py /home/Tokn/utils/sampling_params.py /home/Tokn/utils/request_state.py /home/Tokn/utils/block.py
+from dataclasses import dataclass
+from typing import Any, Optional
+
+
+@dataclass
+class InferenceContext:
+    is_prefill: bool
+    cu_seqlens_q: Optional[Any] = None
+    cu_seqlens_k: Optional[Any] = None
+    max_seqlen_q: Optional[int] = None
+    max_seqlen_k: Optional[int] = None
+    slot_mapping: Optional[Any] = None
+    context_lens: Optional[Any] = None
+    block_tables: Optional[Any] = None
+
+
+_CONTEXT: Optional[InferenceContext] = None
+
+
+def set_context(
+    *,
+    is_prefill: bool,
+    cu_seqlens_q: Optional[Any] = None,
+    cu_seqlens_k: Optional[Any] = None,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    slot_mapping: Optional[Any] = None,
+    context_lens: Optional[Any] = None,
+    block_tables: Optional[Any] = None,
+) -> None:
+    global _CONTEXT
+    _CONTEXT = InferenceContext(
+        is_prefill=is_prefill,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        slot_mapping=slot_mapping,
+        context_lens=context_lens,
+        block_tables=block_tables,
+    )
+
+
+def get_context() -> InferenceContext:
+    if _CONTEXT is None:
+        raise RuntimeError("Inference context is not set. Call set_context() before model forward.")
+    return _CONTEXT
+
+
+def reset_context() -> None:
+    global _CONTEXT
+    _CONTEXT = None
+    import time
+from itertools import count
+from utils.sampling_params import SamplingParams
+
+class Sequence:
+    counter = count()
+
+    def __init__(self, token_ids, max_tokens):
+
+        self.seq_id = next(Sequence.counter)
+
+        self.token_ids = list(token_ids)
+        self.num_prompt_tokens = len(self.token_ids)
+        self.num_tokens = len(self.token_ids)
+
+        self.prompt_len = len(token_ids)
+        self.max_tokens = max_tokens
+
+        self.block_table = None
+        self.num_generated_tokens = 0
+
+        self.num_cached_tokens = 0
+        self.num_scheduled_tokens = 0
+
+        self.block_table = None
+        self.status = "WAITING"
+
+        self.last_token = self.token_ids[-1]
+        self.sampling_params = SamplingParams()
+
+        self.arrival_time = None
+        self.token_timestamps = []
+
+    def append_token(self, token_id):
+        self.token_ids.append(token_id)
+        self.last_token = token_id
+        self.num_tokens += 1
+        self.num_generated_tokens += 1
+        self.token_timestamps.append(time.perf_counter())
+
+    @property
+    def completion_token_ids(self):
+        return self.token_ids[self.num_prompt_tokens:]
+
+    @property
+    def ttft(self):
+        """Time To First Token: arrival -> first generated token (seconds)."""
+        if self.arrival_time is None or not self.token_timestamps:
+            return None
+        return self.token_timestamps[0] - self.arrival_time
+
+    @property
+    def itls(self):
+        """Inter-Token Latencies: gaps between consecutive generated tokens (seconds)."""
+        ts = self.token_timestamps
+        return [ts[i] - ts[i - 1] for i in range(1, len(ts))]
+
+    @property
+    def tpot(self):
+        """Time Per Output Token: mean decode-step latency = mean(ITL) (seconds)."""
+        if len(self.token_timestamps) < 2:
+            return None
+        decode_time = self.token_timestamps[-1] - self.token_timestamps[0]
+        return decode_time / (len(self.token_timestamps) - 1)
+import argparse
+
+class ServerConfigs:
+    def __init__(self, model=None, host="127.0.0.1", port=8080, dtype="float16", max_length=2048, device="cpu",
+                 tensor_parallel_size=1, enforce_eager=False, max_num_seqs=5,
+                 max_num_batched_tokens=1024, kv_cache_block_size=256, max_model_len=2048):
+        self.model = model
+        self.dtype = dtype
+        self.max_length = max_length
+        self.host = host
+        self.port = port
+        self.device = device
+        self.tensor_parallel_size = tensor_parallel_size
+        self.enforce_eager = enforce_eager
+        self.max_num_seqs = max_num_seqs
+        self.max_num_batched_tokens = max_num_batched_tokens
+        self.kv_cache_block_size = kv_cache_block_size
+        self.max_model_len = max_model_len
+
+    @classmethod
+    def from_cli(cls):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--model", required=True)
+        parser.add_argument("--dtype", default="float16")
+        parser.add_argument("--max_length", default=2048)
+        parser.add_argument("--host", default="127.0.0.1")
+        parser.add_argument("--port", type=int, default=8080)
+        parser.add_argument("--device", default="cpu")
+        parser.add_argument("--tensor_parallel_size", type=int, default=1)
+        parser.add_argument("--enforce_eager", action="store_true")
+        parser.add_argument("--max_num_seqs", type=int, default=5)
+        parser.add_argument("--max_num_batched_tokens", type=int, default=1024)
+        parser.add_argument("--kv_cache_block_size", type=int, default=256)
+        parser.add_argument("--max_model_len", type=int, default=2048)
+        args = parser.parse_args()
+        return cls(model=args.model, host=args.host, port=args.port, device=args.device,
+                   tensor_parallel_size=args.tensor_parallel_size, enforce_eager=args.enforce_eager,
+                   max_num_seqs=args.max_num_seqs, max_num_batched_tokens=args.max_num_batched_tokens,
+                   kv_cache_block_size=args.kv_cache_block_size, max_model_len=args.max_model_len)
+    from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class SamplingParams:
+    temperature: float = 0.0
+    max_tokens: int = 128
+    ignore_eos: bool = False
+from utils.sequence import Sequence
+import asyncio
+from dataclasses import dataclass
+
+@dataclass
+class RequestState:
+    seq: Sequence
+    done: asyncio.Event
+    output: str | None = None
+    error: Exception | None = None
+
+
+class Block:
+    def __init__(self, block_id):
+        self.block_id = block_id
+        self.ref_count = 0
+        self.hash = -1
+        self.token_ids = []
+
+    def reset(self):
+        self.ref_count = 1
+        self.hash = -1
+        self.token_ids = []
+
+    def update(self, block_hash: int, token_ids: list[int]):
+        self.hash = block_hash
+        self.token_ids = list(token_ids)
+[0m
+[0m$ [0mgit log --all --oneline --graph | head -50
+* 70c3494 Fix KV-exhaustion hang; add optimizer agent and loop
+* 4d48fb5 env support code removed LD_LIBRARY path
+*   52fa3cb Merge branch 'main' of https://github.com/jaytonde/Tokn
+|\  
+| * 7100a26 images added
+| * a8f6acf benchmarks added
+| * 6461540 updated
+| * 86370f5 updated
+| * 2f24616 updated
+* | ea15ff5 bug temp fix
+|/  
+*   61dceab Merge branch 'main' of https://github.com/jaytonde/Tokn
+|\  
+| * f0aec2d updated
+| * 4551d8d working tp
+* | d992dbc updated README.md
+|/  
+* fb3d943 tp implemented
+* 2ef08c3 code refactoring
+* fc2dcc6 deleted elliot references
+* f49c70f code refactoring
+* 05aee50 typo fix
+*   c062591 Merge branch 'main' of https://github.com/jaytonde/Tokn
+|\  
+| * 8be3fc3 Update README.md
+* | 068af1e torch.compile and cuda graphs implemented
+|/  
+* 01ee290 Added continuous batching, prefix caching and chunked prefill
+* a37ef03 Update README.md
+* 4336f00 Update README.md
+* 06fe158 Update README.md
+* 2e34761 Update README.md
+* 6114e88 image added
+* 53d8745 Update README.md
+* 4ec4d2c Working Scheduler
+* 3fe9158 scheduler is working now
+* 78b82d8 backup
+* 3c9a017 done implementing scheduler
+* faac9b8 updated scheduler, sequence and engine
+* d307166 updated scheduler
+* e145a40 change
+* 246d7e5 scheduler
+* 02baffc added scheduler generate functions
+* 4e145db comment added
+* 6ca9336 scheduler inetegration
+* 7e39caf added simple scheduler and sequence
+* 69838f2 added gitignore
+* 769ad67 working kv cache
+* 4cefbec KV cache implementation completed
+* e612b11 jhkhkj
+[0m
+[0m$ [0mgit show --stat 068af1e | head -40; echo "===="; git show --stat 01ee290 | head -40
+commit 068af1ebe696e98ccdd024fe20f33fd6aece1037
+Author: Jaydev Tonde <your.email@example.com>
+Date:   Sat Jun 20 10:30:19 2026 +0530
+
+    torch.compile and cuda graphs implemented
+
+ benchmark.py                       | 499 ++++++++++++++++++++++++++++++
+ block_manager.py                   |   4 -
+ commands.sh                        |  31 +-
+ configs.py                         |  11 +-
+ context.py                         |  63 ++--
+ data/prefix_cache_test_prompts.txt |  17 ++
+ data/questions.jsonl               | 400 ++++++++++++++++++++++++
+ debug_serve.py                     | 607 ++++++++++++++++++++++++++++++++++++-
+ engine.py                          | 597 +++++++++++++++++-------------------
+ fastapi_server.py                  |  21 +-
+ layers/activation.py               |   1 +
+ request_state.py                   |  11 +
+ sampling_params.py                 |   2 +-
+ scheduler.py                       |  87 ++++--
+ sequence.py                        |  34 ++-
+ serve.py                           |  53 +++-
+ 16 files changed, 2042 insertions(+), 396 deletions(-)
+====
+commit 01ee290c5be6cb1edc3fb6318f5175088871a0ce
+Author: Jaydev Tonde <your.email@example.com>
+Date:   Sun May 31 14:56:53 2026 +0530
+
+    Added continuous batching, prefix caching and chunked prefill
+
+ __init__.py        |   6 +
+ block.py           |  17 +++
+ block_manager.py   | 343 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ commands.sh        |   2 +-
+ configs.py         |  11 +-
+ engine.py          | 133 +++++++++++++++++----
+ fastapi_server.py  |   4 +-
+ llm.py             |   7 ++
+ requirements.txt   |   4 +-
+ sampling_params.py |   8 ++
+ sequence.py        |   5 +
+ serve.py           |   7 +-
+ 12 files changed, 514 insertions(+), 33 deletions(-)
+[0m
+[0m# [0mTodos
+[•] Create OPTIMIZATION_LOG.md with baseline + structure
+[ ] Run vLLM baseline (record target in log)
+[ ] Investigate CUDA-graph (non-eager) path bug in src/run.py
+[ ] Build correctness.py gate (greedy outputs, batch-1 identical)
+[ ] Fix graph path + enable graphs in benchmark; correctness gate
+[ ] Benchmark full 400-prompt run; keep/revert; log
+[ ] More experiments (sync removal, kernels, scheduler) as time allows
+[0m
+Now I understand the state. The CUDA-graph path (log 4, 452 tok/s) was broken by later refactoring, and the benchmark now forces eager. Let me create the log and set up the todo list.
+[0m← [0mWrite OPTIMIZATION_LOG.md
+Wrote file successfully.
+[0m
+Now let me run the vLLM baseline. First check for leftover processes, then run it.
+[0m$ [0mpkill -f "[d]ebug/benchmark.py"; pkill -f "[c]ompile_worker"; sleep 1; nvidia-smi --query-compute-apps=pid,used_memory --format=csv 2>/dev/null; echo "---procs---"; ps aux | grep -E "[p]ython" | head -20
+pid, used_gpu_memory [MiB]
+---procs---
+root          78  0.0  0.0 246180 105884 ?       S    09:31   0:02 /root/miniconda3/envs/py3.10/bin/python3.10 /root/miniconda3/envs/py3.10/bin/jupyter-lab --ip=0.0.0.0 --NotebookApp.token=aYJQnzI6BEPITqMuwQWcKUSKViys3GNAGm91bVKmzYaTL9ic9pyMT2808ymDwVQx --allow-root --port 8889
+root       43323  1.7  0.0 670332 52348 pts/1    Sl+  12:03   0:46 /home/Tokn/.venv/bin/python3 /home/Tokn/.venv/bin/nvitop
+[0m
+GPU is free. Running the vLLM baseline now (foreground, standard command).
+[0m$ [0mtimeout 1500 env PYTHONPATH=/home/Tokn .venv-vllm/bin/python debug/benchmark.py --framework vllm --model Qwen/Qwen3-0.6B --dtype bf16 --device cuda --max-tokens 256 --max-model-len 2048 --questions data/questions.jsonl --num-prompts 400 --request-rate 2 2>&1 | tail -40
+(EngineCore pid=54742) INFO 10-09 12:48:02 [model_runner.py:407] Model loading took 1.12 GiB memory and 3.302397 seconds
+(EngineCore pid=54742) INFO 10-09 12:48:02 [topk_topp_sampler.py:124] Using FlashInfer for top-p & top-k sampling.
+(EngineCore pid=54742) INFO 10-09 12:48:02 [torch_utils.py:286] Reducing Torch threads from 16 to 1 for serving. Set OMP_NUM_THREADS in the external environment to override.
+(EngineCore pid=54742) INFO 10-09 12:48:02 [utils.py:343] Using LBNHC KV cache layout.
+(EngineCore pid=54742) INFO 10-09 12:48:03 [caching.py:342] reconstructed serializable fn from standalone compile artifacts. num_artifacts=3 num_submods=29
+(EngineCore pid=54742) INFO 10-09 12:48:03 [decorators.py:312] Directly load AOT compilation from path /home/.cache/vllm/torch_compile_cache/torch_aot_compile/7399926ae558529ba0fa0b3f4ef961262b488af09364daff0a29a9fe08f30773/rank_0_0/model
+(EngineCore pid=54742) INFO 10-09 12:48:03 [monitor.py:53] torch.compile took 0.20 s in total
+(EngineCore pid=54742) INFO 10-09 12:48:03 [monitor.py:81] Initial profiling/warmup run took 0.15 s
+Capturing CUDA graphs (PIECEWISE):   0%|          | 0/5 [00:00<?, ?it/s]Capturing CUDA graphs (PIECEWISE):  40%|████      | 2/5 [00:00<00:00, 17.50it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 5/5 [00:00<00:00, 22.82it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 5/5 [00:00<00:00, 22.00it/s]
+Capturing CUDA graphs (FULL):   0%|          | 0/2 [00:00<?, ?it/s]Capturing CUDA graphs (FULL): 100%|██████████| 2/2 [00:00<00:00, 32.10it/s]
+(EngineCore pid=54742) INFO 10-09 12:48:05 [model_runner.py:1087] Graph capturing finished in 1 secs, took 0.05 GiB
+(EngineCore pid=54742) INFO 10-09 12:48:05 [gpu_worker.py:692] Available KV cache memory: 19.87 GiB
+(EngineCore pid=54742) INFO 10-09 12:48:05 [gpu_worker.py:707] CUDA graph memory profiling is enabled (default since v0.21.0). The current --gpu-memory-utilization=0.9000 is equivalent to --gpu-memory-utilization=0.8973 without CUDA graph memory profiling. To maintain the same effective KV cache size as before, increase --gpu-memory-utilization to 0.9027. To disable, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.
+(EngineCore pid=54742) INFO 10-09 12:48:05 [kv_cache_utils.py:2464] GPU KV cache size: 186,064 tokens, Maximum concurrency for 2,048 tokens per request: 90.85x
+(EngineCore pid=54742) INFO 10-09 12:48:05 [kernel_warmup.py:172] JIT kernel warmup starting.
+(EngineCore pid=54742) INFO 10-09 12:48:05 [kernel_warmup.py:185] JIT kernel warmup finished in 0.00s.
+Capturing CUDA graphs (PIECEWISE):   0%|          | 0/5 [00:00<?, ?it/s]Capturing CUDA graphs (PIECEWISE):  80%|████████  | 4/5 [00:00<00:00, 33.65it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 5/5 [00:00<00:00, 33.93it/s]
+Capturing CUDA graphs (FULL):   0%|          | 0/4 [00:00<?, ?it/s]Capturing CUDA graphs (FULL): 100%|██████████| 4/4 [00:00<00:00, 42.10it/s]
+(EngineCore pid=54742) INFO 10-09 12:48:07 [model_runner.py:1087] Graph capturing finished in 1 secs, took 0.03 GiB
+(EngineCore pid=54742) INFO 10-09 12:48:07 [gpu_worker.py:892] CUDA graph pool memory: 0.03 GiB (actual), 0.06 GiB (estimated), difference: 0.03 GiB (106.2%).
+(EngineCore pid=54742) INFO 10-09 12:48:07 [gpu_worker.py:955] Free memory on device (23.37/23.6 GiB) on startup. Desired GPU memory utilization is (0.9, 21.24 GiB). Actual usage is 1.27 GiB for consumed memory (weights + non-torch), 0.09 GiB for peak activation, and 0.03 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=21148648653` (19.7 GiB) to fit into requested memory, or `--kv-cache-memory=23436130304` (21.83 GiB) to fully utilize gpu memory. Current kv cache memory in use is 19.87 GiB.
+(EngineCore pid=54742) INFO 10-09 12:48:08 [jit_monitor.py:84] Kernel JIT monitor activated; monitored JIT compilations during inference will use mode=warn.
+(EngineCore pid=54742) INFO 10-09 12:48:08 [core.py:373] init engine (profile, create kv cache, warmup model) took 6.05 s (compilation: 0.20 s)
+(EngineCore pid=54742) INFO 10-09 12:48:08 [kernel.py:408] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['triton', 'native'])
+(MainProcess pid=54623) WARNING 10-09 12:48:11 [input_processor.py:375] Passing raw prompts to InputProcessor is deprecated and will be removed in the future. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+(MainProcess pid=54623) INFO 10-09 12:51:41 [core_client.py:762] [shutdown] MPClient: start timeout=default
+(MainProcess pid=54623) INFO 10-09 12:51:41 [core_client.py:764] [shutdown] MPClient: stopping engine manager
+(MainProcess pid=54623) INFO 10-09 12:51:41 [utils.py:638] [shutdown] Process manager: send sigterm to process EngineCore
+(EngineCore pid=54742) INFO 10-09 12:51:41 [core.py:1409] [shutdown] EngineCore: trigger received signal=SIGTERM
+(EngineCore pid=54742) INFO 10-09 12:51:41 [core.py:1558] [shutdown] EngineCore: start mode=abort timeout=0s
+(EngineCore pid=54742) INFO 10-09 12:51:41 [core.py:1589] [shutdown] EngineCore: request processing complete; starting resource teardown
+(EngineCore pid=54742) INFO 10-09 12:51:41 [core.py:1422] [shutdown] EngineCore: exiting busy loop
+(MainProcess pid=54623) INFO 10-09 12:51:43 [core_client.py:766] [shutdown] MPClient: engine manager stopped
+(MainProcess pid=54623) INFO 10-09 12:51:43 [core_client.py:767] [shutdown] MPClient: cleaning up background resources
+(MainProcess pid=54623) INFO 10-09 12:51:43 [core_client.py:769] [shutdown] MPClient: complete
+
+[vllm] prompts=400 output_tokens=96508 elapsed=210.780s throughput=457.86 tok/s
+  TTFT  mean=17.87ms p50=16.62ms p99=83.05ms
+  TPOT  mean=3.18ms p50=3.18ms p99=3.40ms
+  ITL   mean=3.18ms p50=3.18ms p99=3.40ms
+[0m
+vLLM baseline recorded: **457.86 tok/s**, TTFT mean 17.87ms, TPOT mean 3.18ms. Let me update the log with this target, then start investigating the CUDA-graph path.
+[0m← [0mEdit OPTIMIZATION_LOG.md
+Index: /home/Tokn/OPTIMIZATION_LOG.md
+===================================================================
+--- /home/Tokn/OPTIMIZATION_LOG.md
++++ /home/Tokn/OPTIMIZATION_LOG.md
+@@ -3,9 +3,10 @@
+ ## Scoreboard
+ 
+ | # | Change | Cumulative tok/s | TTFT mean (ms) | TPOT mean (ms) | vs vLLM (tok/s ratio) |
+ |---|--------|-----------------|----------------|----------------|----------------------|
+-| 0 | baseline (eager, forced by benchmark, after KV-admission fix) | 121.53 | 264765 | 40.72 | 0.26x (vLLM target TBD) |
++| 0 | baseline (eager, forced by benchmark, after KV-admission fix) | 121.53 | 264765 | 40.72 | 0.26x |
++| - | vLLM 0.31.0 target (this machine, 2026-10-09) | 457.86 | 17.87 | 3.18 | 1.00x |
+ 
+ ## Experiments tried
+ 
+ | N | Idea | Area (graphs/kernel/scheduler/sync/memory/compile/server/config) | Result | Delta tok/s | Why |
+
+[0m
+[0m$ [0mgit show 068af1e:engine.py > /tmp/engine_old.py 2>/dev/null && wc -l /tmp/engine_old.py; git show 068af1e --stat | grep -E "run.py|engine.py|attention|context" | head; echo "===context old==="; git show 068af1e:context.py 2>/dev/null | head -100
+594 /tmp/engine_old.py
+ context.py                         |  63 ++--
+ engine.py                          | 597 +++++++++++++++++-------------------
+===context old===
+
+from dataclasses import dataclass
+from typing import Any, Optional
+
+
+@dataclass
+class InferenceContext:
+    is_prefill: bool
+    cu_seqlens_q: Optional[Any] = None
+    cu_seqlens_k: Optional[Any] = None
+    max_seqlen_q: Optional[int] = None
+    max_seqlen_k: Optional[int] = None
+    slot_mapping: Optional[Any] = None
+    context_lens: Optional[Any] = None
+    block_tables: Optional[Any] = None
+
+
+_CONTEXT: Optional[InferenceContext] = None
+
+
+def set_context(
+    *,
+    is_prefill: bool,
+    cu_seqlens_q: Optional[Any] = None,
+    cu_seqlens_k: Optional[Any] = None,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    slot_mapping: Optional[Any] = None,
+    context_lens: Optional[Any] = None,
+    block_tables: Optional[Any] = None,
+) -> None:
+    global _CONTEXT
+    _CONTEXT = InferenceContext(
+        is_prefill=is_prefill,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        slot_mapping=slot_mapping,
+        context_lens=context_lens,
+        block_tables=block_tables,
+    )
+
+
+def get_context() -> InferenceContext:
+    if _CONTEXT is None:
+        raise RuntimeError("Inference context is not set. Call set_context() before model forward.")
+    return _CONTEXT
+
+
+def reset_context() -> None:
+    global _CONTEXT
+    _CONTEXT = None
+[0m
+Let me investigate the CUDA-graph path. First, let me see how the graph path looked when it worked (log 4 era) vs now.
+[0m$ [0mgrep -n "cudagraph\|CUDAGraph\|graph_pool\|graph_bs\|graph_vars\|def run_model\|def run\b\|enforce_eager\|replay\|def capture" /tmp/engine_old.py | head -60
+48:    def __init__(self, model: str = "Qwen/Qwen2.5-0.5B", enforce_eager=False, device: str = "cpu", dtype: str = "fp16", max_model_len: int = 2048):
+76:        self.enforce_eager = enforce_eager
+78:        self.graph_pool = None
+79:        self.graph_bs = []
+80:        self.graph_vars = {}
+161:        if self.device.startswith("cuda") and not self.enforce_eager:
+162:            self.capture_cudagraph()
+176:    def capture_cudagraph(self):
+191:        self.graph_bs  = [bs for bs in (1,2,3,4) if bs <= max_bs]
+193:        if max_bs not in self.graph_bs:
+194:            self.graph_bs.append(max_bs)
+197:        for bs in reversed(self.graph_bs):
+198:            graph = torch.cuda.CUDAGraph()
+208:            with torch.cuda.graph(graph, self.graph_pool):
+211:            if self.graph_pool is None:
+212:                self.graph_pool = graph.pool()
+218:        self.graph_vars = dict(
+227:    def run_model(self, input_ids, positions, is_prefill):
+229:        if is_prefill or self.enforce_eager or not self.graphs or input_ids.size(0) > self.graph_bs[-1]:
+235:        gv      = self.graph_vars
+245:        graph.replay()
+[0m
+[0m$ [0msed -n '150,320p' /tmp/engine_old.py
+print(f"Loading model onto device : {self.device}")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model)
+        model_path = snapshot_download(self.model)
+        logger.info(f"Model downloaded to: {model_path}")
+
+        load_model(self.custom_model, model_path)
+        self.custom_model = self.custom_model.to(dtype=self.dtype, device=self.device)
+
+        #Initializing the KV Cache
+        self.allocate_kv_cache()
+
+        if self.device.startswith("cuda") and not self.enforce_eager:
+            self.capture_cudagraph()
+
+        self.scheduler = Scheduler(
+            max_num_seqs=5,
+            max_num_batched_tokens=1024,
+            eos_token_id=self.tokenizer.eos_token_id,
+            block_manager=self.block_manager,
+            device=self.device,
+        )
+
+        self.model = AutoModelForCausalLM.from_pretrained(self.model, torch_dtype=self.dtype).to(self.device)
+        logger.info("HF reference model loaded")
+    
+    @torch.inference_mode()
+    def capture_cudagraph(self):
+        config         = self.hf_config
+        hidden_size    = config.hidden_size
+        max_bs         = self.scheduler.max_num_seqs
+        max_num_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
+        device         = torch.device(self.device)
+
+        # Static buffers — addresses are frozen for the lifetime of the graphs.
+        input_ids      = torch.zeros(max_bs, dtype=torch.long,  device=device)
+        positions      = torch.zeros(max_bs, dtype=torch.long,  device=device)
+        slot_mapping   = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        context_lens   = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        block_tables   = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device=device)
+        outputs        = torch.zeros(max_bs, hidden_size, dtype=self.dtype, device=device)
+
+        self.graph_bs  = [bs for bs in (1,2,3,4) if bs <= max_bs]
+
+        if max_bs not in self.graph_bs:
+            self.graph_bs.append(max_bs)
+
+
+        for bs in reversed(self.graph_bs):
+            graph = torch.cuda.CUDAGraph()
+            set_context(
+                is_prefill=True,
+                slot_mapping=slot_mapping[:bs],
+                context_lens=context_lens[:bs],
+                block_tables=block_tables[:bs]
+            )
+
+            # Warmup run (lazy allocs / autotune happen OUTSIDE the graph).
+            outputs[:bs] = self.custom_model.model(input_ids[:bs], positions[:bs])
+            with torch.cuda.graph(graph, self.graph_pool):
+                outputs[:bs] = self.custom_model.model(input_ids[:bs], positions[:bs])
+
+            if self.graph_pool is None:
+                self.graph_pool = graph.pool()
+
+            self.graphs[bs] = graph
+            torch.cuda.synchronize()
+            reset_context()
+
+        self.graph_vars = dict(
+            input_ids=input_ids,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables,
+            outputs=outputs
+        )
+
+    def run_model(self, input_ids, positions, is_prefill):
+
+        if is_prefill or self.enforce_eager or not self.graphs or input_ids.size(0) > self.graph_bs[-1]:
+            return self.custom_model(input_ids, positions)
+
+        bs      = input_ids.size(0)
+        context = get_context()
+        graph   = self.graphs[next(x for x in self.graphs_bs if x >= bs)]
+        gv      = self.graph_vars
+
+        gv["input_ids"][:bs] = input_ids
+        gv["positions"][:bs] = positions
+        gv["slot_mapping"].fill_(-1)          # padding rows write nowhere
+        gv["slot_mapping"][:bs] = context.slot_mapping
+        gv["context_lens"].zero_()            # padding rows attend to nothing
+        gv["context_lens"][:bs] = context.context_lens
+        gv["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+
+        graph.replay()
+
+        return self.custom_model.compute_logits(gv["outputs"][:bs])
+
+    def prepare_prefill(self, seqs):
+        input_ids = []
+        positions = []
+        slot_mapping = []
+        cu_seqlens_q = [0]
+        cu_seqlens_k = [0]
+        block_tables = []
+
+        max_seqlen_q = 0
+        max_seqlen_k = 0
+
+        for seq in seqs:
+            start = seq.num_cached_tokens
+            end = start + seq.num_scheduled_tokens
+
+            tokens = seq.token_ids[start:end]
+
+            input_ids.extend(tokens)
+            positions.extend(range(start, end))
+            cu_seqlens_q.append(cu_seqlens_q[-1] + len(tokens))
+            cu_seqlens_k.append(cu_seqlens_k[-1] + end)
+            max_seqlen_q = max(max_seqlen_q, len(tokens))
+            max_seqlen_k = max(max_seqlen_k, end)
+
+            for pos in range(start, end):
+                logical_block_id = pos // self.block_size
+                block_offset = pos % self.block_size
+                physical_block_id = seq.block_table[0, logical_block_id].item()
+                slot = physical_block_id * self.block_size + block_offset
+                slot_mapping.append(slot)
+
+            block_tables.append(seq.block_table.squeeze(0).tolist())
+
+        max_blocks = max(len(x) for x in block_tables)
+        block_tables = [x + [-1] * (max_blocks - len(x)) for x in block_tables]
+
+        device = torch.device(self.device)
+
+        input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
+        positions = torch.tensor(positions, dtype=torch.long, device=device)
+        cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, device=device)
+        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, device=device)
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, device=device)
+        block_tables = torch.tensor(block_tables, dtype=torch.int32, device=device)
+
+        set_context(
+            is_prefill=True,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            slot_mapping=slot_mapping,
+            block_tables=block_tables,
+        )
+
+        return input_ids, positions
+
+    def prepare_decode(self, seqs):
+        input_ids = []
+        positions = []
+        slot_mapping = []
+        context_lens = []
+        block_tables = []
+
+        for seq in seqs:
+            pos = len(seq.token_ids) - 1
+
+            input_ids.append(seq.last_token)
+            positions.append(pos)
+            context_lens.append(len(seq.token_ids))
+
+            logical_block_id = pos // self.block_size
+[0m
+[0m$ [0mcat /home/Tokn/data/prefix_cache_test_prompts.txt; echo "=== questions head ==="; head -3 /home/Tokn/data/questions.jsonl; echo "=== seq head ==="; head -3 /home/Tokn/data/questions.jsonl | cut -c1-200
+[
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What is the capital of France?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: How many days are in a week?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What color is the sky on a clear day?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: How many legs does a spider have?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What is 2 + 2?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What planet do we live on?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: How many months are in a year?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What is the boiling point of water in Celsius?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: Who wrote Romeo and Juliet?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What is the largest ocean on Earth?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: How many continents are there?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What gas do plants absorb from the atmosphere?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What is the square root of 64?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: How many hours are in a day?",
+"You are a meticulous and knowledgeable technical assistant working inside a large software engineering organization. You always answer clearly, concisely, and accurately. Before answering, you carefully read the entire question, consider edge cases, and make sure your response is factually correct. You prefer plain language over jargon, you explain your reasoning step by step when it helps the reader, and you never invent facts that you are not sure about. You have deep expertise across mathematics, physics, chemistry, biology, geography, history, world languages, computer science, and general trivia. When a question has a single correct answer, you give that answer directly and then, if useful, add one short sentence of context. When a question is ambiguous, you state the most common interpretation and answer that. You keep your tone friendly and professional, you avoid unnecessary filler, and you respect the reader's time. Treat every question below as independent, and base your answer only on well-established, widely accepted knowledge.  You always maintain a calm, neutral, and professional tone, and you never express personal opinions, emotions, or speculation as if they were facts. You are careful to distinguish between what is definitely known, what is commonly believed, and what is genuinely uncertain, and you make that distinction explicit whenever it matters to the reader. When a question involves numbers, units, dates, or measurements, you double-check them mentally before responding, and you prefer internationally recognized standards and SI units unless the reader clearly expects something else. When a question could be interpreted in more than one reasonable way, you briefly note the interpretation you are using before you answer it. You do not pad your responses with unnecessary disclaimers, apologies, or repeated restatements of the question, and you avoid filler phrases that add length without adding meaning. You assume the reader is intelligent but may not share your specific background, so you define unusual terms the first time you use them. You never fabricate citations, statistics, names, or sources, and if you are not confident about a specific detail you say so plainly rather than guessing. You treat each question independently, you do not carry over assumptions from earlier questions, and you base every answer strictly on stable, widely accepted, and well-documented knowledge. Now, please answer the following question as accurately and concisely as possible: What is the chemical symbol for water?"
+]=== questions head ===
+{"question": "What are the main advantages and disadvantages of the carbon cycle? Answer in one detailed paragraph.", "in_bucket": "medium", "out_bucket": "para"}
+{"question": "Write a detailed, well-structured essay (several paragraphs) explaining compound interest, covering its history, how it works, real-world applications, and current limitations. Use clear section transitions. Write a thorough, multi-paragraph response.", "in_bucket": "long", "out_bucket": "long"}
+{"question": "What planet is known as the Morning Star?", "in_bucket": "short", "out_bucket": "tiny"}
+=== seq head ===
+{"question": "What are the main advantages and disadvantages of the carbon cycle? Answer in one detailed paragraph.", "in_bucket": "medium", "out_bucket": "para"}
+{"question": "Write a detailed, well-structured essay (several paragraphs) explaining compound interest, covering its history, how it works, real-world applications, and current limitations. Use clear
+{"question": "What planet is known as the Morning Star?", "in_bucket": "short", "out_bucket": "tiny"}
+[0m
+[0m$ [0mcat /home/Tokn/src/llm.py; echo "=== loader ==="; cat /home/Tokn/utils/loader.py; echo "=== requirements ==="; cat /home/Tokn/requirements.txt; echo "=== src/__pycache__ ==="; ls /home/Tokn/src/__pycache__
+from src.engine import Engine
+from utils.sampling_params import SamplingParams
+
+class LLM(Engine):
+    pass
+
+
+=== loader ===
+import os
+from glob import glob
+import torch
+from torch import nn
+from safetensors import safe_open
+
+
+def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
+    param.data.copy_(loaded_weight)
+
+
+def load_model(model: nn.Module, path: str):
+    packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
+    for file in glob(os.path.join(path, "*.safetensors")):
+        with safe_open(file, "pt", "cpu") as f:
+            for weight_name in f.keys():
+                for k in packed_modules_mapping:
+                    if k in weight_name:
+                        v, shard_id = packed_modules_mapping[k]
+                        param_name = weight_name.replace(k, v)
+                        param = model.get_parameter(param_name)
+                        weight_loader = getattr(param, "weight_loader")
+                        weight_loader(param, f.get_tensor(weight_name), shard_id)
+                        break
+                else:
+                    param = model.get_parameter(weight_name)
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, f.get_tensor(weight_name))=== requirements ===
+fastapi[all]
+uvicorn
+numpy
+xxhash=== src/__pycache__ ===
+block_manager.cpython-310.pyc
+engine.cpython-310.pyc
+llm.cpython-310.pyc
+qwen3.cpython-310.pyc
+run.cpython-310.pyc
+scheduler.cpython-310.pyc
+[0m
+The old code had `is_prefill=True` during capture (a latent bug), the new code uses `is_prefill=False` (correct). Let me look at the rest of the current run.py decode path and check the data files, then build a correctness harness to find the actual graph-path bug empirically.
+[0m← [0mWrite debug/correctness.py
+Wrote file successfully.
+[0m
+Now let me build the correctness harness. I'll write `debug/correctness.py` that drives the engine synchronously, generates greedy tokens, and can compare eager vs graph modes.
+Now let me generate the eager reference. First ensure no leftover processes holding port 2333.
+[0m$ [0mpkill -f "[d]ebug/benchmark.py"; pkill -f "[c]ompile_worker"; pkill -f "[c]orrectness.py"; sleep 1; ss -ltnp 2>/dev/null | grep 2333 || echo "port 2333 free"
+port 2333 free
+[0m
+[0m$ [0mtimeout 600 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode eager --out /tmp/ref_eager.json 2>&1 | tail -20
+2026-10-09 12:52:22,788 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-10-09 12:52:23,040 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-09 12:52:23,833 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+2026-10-09 12:52:24,094 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main "HTTP/1.1 200 OK"
+Loading model onto device : cuda
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 1881.11it/s]
+2026-10-09 12:52:24,101 - src.run - INFO - Model downloaded to: /home/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
+2026-10-09 12:52:24,370 - src.run - INFO - KV cache sizing (static): max_model_len=2048, requested_blocks=8, selected_blocks=56
+2026-10-09 12:52:24,371 - src.run - WARNING - 
+
+BlockManager initialized: 
+num_blocks=56, 
+block_size=256, 
+free_blocks=56
+2026-10-09 12:52:24,621 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+2026-10-09 12:52:24,876 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-10-09 12:52:25,125 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-09 12:52:25,907 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+eager: 37 sequences, 1776 output tokens -> /tmp/ref_eager.json
+[rank0]:[W1009 12:52:43.059481733 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[0m
+Eager reference generated. Now the critical test — graph mode. Does the CUDA-graph decode path produce identical tokens?
+[0m$ [0mtimeout 600 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode graph --out /tmp/graph.json 2>&1 | tail -25
+2026-10-09 12:52:51,461 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+2026-10-09 12:52:51,717 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+2026-10-09 12:52:52,523 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+2026-10-09 12:52:52,778 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-10-09 12:52:53,032 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-09 12:52:53,817 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+2026-10-09 12:52:54,069 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main "HTTP/1.1 200 OK"
+Loading model onto device : cuda
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 1750.11it/s]
+2026-10-09 12:52:54,077 - src.run - INFO - Model downloaded to: /home/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
+2026-10-09 12:52:54,350 - src.run - INFO - KV cache sizing (static): max_model_len=2048, requested_blocks=8, selected_blocks=56
+2026-10-09 12:52:54,351 - src.run - WARNING - 
+
+BlockManager initialized: 
+num_blocks=56, 
+block_size=256, 
+free_blocks=56
+2026-10-09 12:52:56,739 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+2026-10-09 12:52:56,997 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-10-09 12:52:57,249 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-10-09 12:52:58,046 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+graph: 37 sequences, 1776 output tokens -> /tmp/graph.json
+graph mode: graph_bs= [1, 2, 3, 4, 5]
+[rank0]:[W1009 12:53:02.255802448 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[0m
+[0m$ [0mtimeout 120 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode compare --ref /tmp/ref_eager.json --out /tmp/graph.json 2>&1 | tail -15
+ref=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 11, 330, 4340, 1657, 2849, 525, 304, 264, 2003, 7521, 6771, 752]
+    got=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 11, 330, 4340, 1657, 2849, 525, 304, 264, 2003, 7521, 6771, 752]
+  diff seq 4: ref len=48 got len=48
+    ref=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 1246, 1657, 14201, 264, 34354, 702, 13, 6771, 752, 1744, 13, 3089]
+    got=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 1246, 1657, 14201, 264, 34354, 702, 13, 6771, 752, 1744, 13, 3089]
+  diff seq 8: ref len=48 got len=48
+    ref=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 369, 279, 49837, 1459, 315, 3015, 304, 61347, 13, 6771, 752, 1744]
+    got=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 369, 279, 49837, 1459, 315, 3015, 304, 61347, 13, 6771, 752, 1744]
+  diff seq 12: ref len=48 got len=48
+    ref=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 11, 330, 3838, 6819, 653, 10779, 34306, 504, 279, 16566, 7521, 6771]
+    got=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 11, 330, 3838, 6819, 653, 10779, 34306, 504, 279, 16566, 7521, 6771]
+  diff seq 15: ref len=48 got len=48
+    ref=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 369, 279, 11483, 7735, 369, 3015, 13, 6771, 752, 1744, 13, 358]
+    got=[151667, 198, 32313, 11, 279, 1196, 374, 10161, 369, 279, 11483, 7735, 369, 3015, 13, 6771, 752, 1744, 13, 358]
+CORRECTNESS FAIL: 5/37 sequences differ
+[0m
+5/37 differ, but the shown prefixes are identical — divergence is later. Let me find exactly where each sequence diverges and whether it's a real bug or near-tie noise.
+[0m$ [0mcd /home/Tokn && .venv/bin/python -c "
+import json
+ref = json.load(open('/tmp/ref_eager.json'))
+got = json.load(open('/tmp/graph.json'))
+for k in ref:
+    r, g = ref[k], got[k]
+    if r != g:
+        # find first divergence
+        for i, (a,b) in enumerate(zip(r,g)):
+            if a != b:
+                print(f'seq {k}: len {len(r)}/{len(g)}, first diff at idx {i}: ref={a} got={b}')
+                break
+        else:
+            print(f'seq {k}: len differs {len(r)} vs {len(g)}')
+"
+seq 2: len 48/48, first diff at idx 45: ref=1366 got=2299
+seq 4: len 48/48, first diff at idx 40: ref=7196 got=358
+seq 8: len 48/48, first diff at idx 40: ref=518 got=13
+seq 12: len 48/48, first diff at idx 42: ref=525 got=374
+seq 15: len 48/48, first diff at idx 30: ref=369 got=472
+[0m
+Divergences are late (idx 30-45), consistent with near-tie flips. Let me establish the noise floor: is the batched run even deterministic run-to-run?
+[0m$ [0mcd /home/Tokn && timeout 600 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode graph --out /tmp/graph2.json 2>&1 | tail -2 && timeout 120 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode compare --ref /tmp/graph.json --out /tmp/graph2.json 2>&1 | tail -3
+graph mode: graph_bs= [1, 2, 3, 4, 5]
+[rank0]:[W1009 12:53:43.609023019 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+CORRECTNESS PASS: all 37 sequences identical
+[0m
+Graph is deterministic run-to-run. Let me check eager determinism too, and run a batch-size-1 test (the real gate).
+[0m$ [0mcd /home/Tokn && timeout 600 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode eager --out /tmp/eager2.json 2>&1 | tail -2 && timeout 120 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode compare --ref /tmp/ref_eager.json --out /tmp/eager2.json 2>&1 | tail -3
+eager: 37 sequences, 1776 output tokens -> /tmp/eager2.json
+[rank0]:[W1009 12:54:21.045812801 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+CORRECTNESS PASS: all 37 sequences identical
+[0m
+Both paths are deterministic individually, but they differ from each other in batched mode — so there IS a real numerical difference. The gate for batching-sensitive changes is: **identical at batch size 1**. Let me add a batch-1 mode to the harness.
+[0m← [0mEdit debug/correctness.py
+Index: /home/Tokn/debug/correctness.py
+===================================================================
+--- /home/Tokn/debug/correctness.py
++++ /home/Tokn/debug/correctness.py
+@@ -62,8 +62,32 @@
+             raise RuntimeError("correctness driver did not finish")
+     return outputs
+ 
+ 
++async def generate_one_at_a_time(
++    engine: Engine, prompts: list[str], max_tokens: int
++) -> dict:
++    """Batch size 1: process each prompt alone so decode never batches.
++
++    This is the gate for bf16 numerics: model-math changes must be bit-identical
++    here (no near-tie ambiguity from batching).
++    """
++    outputs: dict[int, list[int]] = {}
++    for p in prompts:
++        seq_id = await engine.add_async_request(
++            p, SamplingParams(temperature=0.0, max_tokens=max_tokens)
++        )
++        guard = 0
++        while seq_id not in outputs:
++            finished = engine.step()
++            for seq in finished:
++                outputs[seq.seq_id] = seq.completion_token_ids
++            guard += 1
++            if guard > 10000:
++                raise RuntimeError("did not finish seq")
++    return outputs
++
++
+ def main() -> None:
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--mode", choices=["eager", "graph", "compare"], required=True)
+     ap.add_argument("--out", default="/tmp/correctness_out.json")
+
+[0m
+[0m← [0mEdit debug/correctness.py
+Index: /home/Tokn/debug/correctness.py
+===================================================================
+--- /home/Tokn/debug/correctness.py
++++ /home/Tokn/debug/correctness.py
+@@ -93,8 +93,10 @@
+ ap.add_argument("--out", default="/tmp/correctness_out.json")
+ ap.add_argument("--ref", default=None)
+ ap.add_argument("--max-tokens", type=int, default=48)
+ ap.add_argument("--num-questions", type=int, default=20)
++ap.add_argument("--seq-at-a-time", action="store_true",
++                help="process one prompt at a time (batch size 1)")
+ args = ap.parse_args()
+ 
+ prompts = load_prompts(args.num_questions)
+ 
+
+[0m
+[0m← [0mEdit debug/correctness.py
+Index: /home/Tokn/debug/correctness.py
+===================================================================
+--- /home/Tokn/debug/correctness.py
++++ /home/Tokn/debug/correctness.py
+@@ -140,9 +140,12 @@
+     device="cuda",
+     max_model_len=2048,
+     config=cfg,
+ )
+-outputs = asyncio.run(generate(engine, prompts, args.max_tokens))
++if args.seq_at_a_time:
++    outputs = asyncio.run(generate_one_at_a_time(engine, prompts, args.max_tokens))
++else:
++    outputs = asyncio.run(generate(engine, prompts, args.max_tokens))
+ 
+ ordered = {str(seq_id): outputs[seq_id] for seq_id in sorted(outputs)}
+ with open(args.out, "w") as f:
+     json.dump(ordered, f)
+
+[0m
+[0m$ [0mcd /home/Tokn && timeout 600 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode eager --out /tmp/ref_eager_bs1.json --seq-at-a-time 2>&1 | tail -1 && timeout 600 env PYTHONPATH=/home/Tokn .venv/bin/python debug/correctness.py --mode graph --out /tmp/graph_bs1.json --seq-at-a-time 2>&1 | tail -1
+[rank0]:[W1009 12:55:59.652371793 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank0]:[W1009 12:56:26.725997413 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[0m
+[0m$ [0mcd /home/Tokn && .venv/bin/python -c "
+import json
+ref = json.load(open('/tmp/ref_eager_bs1.json'))
+got = json.load(open('/tmp/graph_bs1.json'))
+print('keys match:', list(ref.keys())==list(got.keys()))
+n=0
+for k in ref:
+    if ref[k]!=got[k]:
+        n+=1
+        for i,(a,b) in enumerate(zip(ref[k],got[k])):
+            if a!=b:
+                print(f'seq {k} diff idx {i} ref={a} got={b}'); break
+print(f'differs: {n}/{len(ref)}')
+"
+keys match: True
+seq 4 diff idx 40 ref=7196 got=358
+seq 5 diff idx 30 ref=279 got=421
+seq 6 diff idx 32 ref=12941 got=11580
+seq 8 diff idx 40 ref=518 got=13
+seq 15 diff idx 30 ref=369 got=472
+seq 26 diff idx 46 ref=448 got=11
+seq 33 diff idx 42 ref=69700 got=323
+differs: 7/37
+[0m
+Even at batch size 1, eager and graph differ in 7/37 sequences — this is a **real numerical bug** in the graph decode path. Let me pinpoint it by directly comparing decode logits. First, let me understand block allocation.
+[0m→ [0mRead src/block_manager.py
+[0m
+[0m← [0mWrite debug/decodeprobe.py
+Wrote file successfully.
+[0m
+Let me write a focused probe that isolates the decode path and dumps logits for eager vs graph comparison.
+[0m$ [0mcd /home/Tokn && pkill -f "[c]orrectness.py"; pkill -f "[d]ecodeprobe.py"; sleep 1
+timeout 300 env PYTHONPATH=/home/Tokn .venv/bin/python debug/decodeprobe.py --mode eager --out /tmp/logits_eager.pt 2>&1 | tail -3
+timeout 300 env PYTHONPATH=/home/Tokn .venv/bin/python debug/decodeprobe.py --mode graph --out /tmp/logits_graph.pt 2>&1 | tail -3
+(no output)
+
+<shell_metadata>
+shell tool terminated command after exceeding timeout 620000 ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.
+</shell_metadata>
+[0m
