@@ -144,6 +144,7 @@ class Run:
 
         # FlashAttention paged KV cache requires block_size divisible by 256.
         self.block_size = 256
+        self.max_num_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
 
         num_layers = config.num_hidden_layers
         num_kv_heads = config.num_key_value_heads // self.world_size
@@ -300,6 +301,7 @@ class Run:
         gv["slot_mapping"][:bs] = context.slot_mapping
         gv["context_lens"].zero_()            # padding rows attend to nothing
         gv["context_lens"][:bs] = context.context_lens
+        gv["block_tables"].fill_(-1)          # keep padding deterministic (-1)
         gv["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
 
         graph.replay()
@@ -355,7 +357,7 @@ class Run:
 
             block_tables.append(seq.block_table.squeeze(0).tolist())
 
-        max_blocks = max(len(x) for x in block_tables)
+        max_blocks = self.max_num_blocks
         block_tables = [x + [-1] * (max_blocks - len(x)) for x in block_tables]
 
         device = torch.device(self.device)
@@ -401,7 +403,7 @@ class Run:
 
             block_tables.append(seq.block_table.squeeze(0).tolist())
 
-        max_blocks = max(len(x) for x in block_tables)
+        max_blocks = self.max_num_blocks
 
         block_tables = [x + [-1] * (max_blocks - len(x)) for x in block_tables] #wht?
 

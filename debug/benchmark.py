@@ -126,7 +126,7 @@ def run_tokn(args) -> dict:
         max_length=args.max_model_len,
         max_model_len=args.max_model_len,
         tensor_parallel_size=args.tensor_parallel_size,
-        enforce_eager=True,               # non-eager path is still buggy in tokn
+        enforce_eager=False,               # CUDA-graph decode fixed (block_table padding); passes bs-1 correctness gate
         max_num_seqs=TOKN_MAX_NUM_SEQS,
         max_num_batched_tokens=TOKN_MAX_NUM_BATCHED_TOKENS,
     )
