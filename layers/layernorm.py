@@ -5,18 +5,40 @@ import triton.language as tl
 
 
 @triton.jit
+def convert_add_kernel(
+    x_ptr,        # bf16 (rows, n)
+    r_ptr,        # bf16 (rows, n), ignored if HAS_RES==False
+    xf_ptr,       # fp32 out (rows, n)
+    res_ptr,      # bf16 out (rows, n), ignored if HAS_RES==False
+    n_cols: tl.constexpr,
+    HAS_RES: tl.constexpr,
+):
+    """xf = x.to(f32) (+ r.to(f32)); res = round_bf16(xf) when HAS_RES."""
+    row = tl.program_id(0)
+    offs = row * n_cols + tl.arange(0, n_cols)
+    x = tl.load(x_ptr + offs).to(tl.float32)
+    if HAS_RES:
+        r = tl.load(r_ptr + offs).to(tl.float32)
+        x = x + r
+        tl.store(res_ptr + offs, x.to(x_ptr.dtype.element_ty))
+    tl.store(xf_ptr + offs, x)
+
+
+@triton.jit
 def rms_scale_kernel(
     x_ptr,        # fp32 (rows, n)
-    inv_ptr,      # fp32 (rows,)
+    var_ptr,      # fp32 (rows,)
     weight_ptr,   # bf16 (n,)
     y_ptr,        # bf16 (rows, n)
     n_cols: tl.constexpr,
+    eps,
 ):
-    """Fused tail of RMSNorm: y = round_bf16(x * inv) * weight (bf16 mult)."""
+    """y = round_bf16(x * rsqrt(var + eps)) * weight  (bf16 weight mult)."""
     row = tl.program_id(0)
     offs = row * n_cols + tl.arange(0, n_cols)
     x = tl.load(x_ptr + offs)
-    inv = tl.load(inv_ptr + row)
+    var = tl.load(var_ptr + row)
+    inv = tl.rsqrt(var + eps)          # bit-identical to torch.rsqrt
     w = tl.load(weight_ptr + tl.arange(0, n_cols))
     x_bf = (x * inv).to(tl.bfloat16)
     tl.store(y_ptr + offs, x_bf * w)
@@ -31,25 +53,24 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
     def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # Compute the RMS statistics (var, inv) in torch to stay bit-identical
-        # with the previous implementation (reduction order matters in bf16);
-        # only the post-stat elementwise tail is fused into Triton.
-        xf = x.float()
-        res = None
-        if residual is not None:
-            xf = xf + residual.float()
-            res = xf.to(x.dtype)
+        # The RMS statistics (var) are computed in torch so the reduction stays
+        # bit-identical with the previous implementation (reduction order matters
+        # in bf16). Only the elementwise parts are fused into Triton:
+        #   convert (+ residual add)          -> convert_add_kernel
+        #   var = mean(xf^2)                  -> torch
+        #   y = round_bf16(xf*rsqrt(var+eps))*w -> rms_scale_kernel
+        x = x.contiguous()
+        n_rows = x.numel() // self.hidden_size
+        xf = torch.empty(n_rows, self.hidden_size, dtype=torch.float32, device=x.device)
+        res = torch.empty_like(x) if residual is not None else None
+        convert_add_kernel[(n_rows,)](
+            x, residual if residual is not None else x, xf, res,
+            self.hidden_size, residual is not None,
+        )
         var = xf.pow(2).mean(dim=-1, keepdim=True)
-        inv = torch.rsqrt(var + self.eps)
-
-        n_rows = xf.numel() // self.hidden_size
         y = torch.empty_like(x)
         rms_scale_kernel[(n_rows,)](
-            xf.view(n_rows, self.hidden_size),
-            inv.view(n_rows),
-            self.weight,
-            y.view(n_rows, self.hidden_size),
-            self.hidden_size,
+            xf, var.view(n_rows), self.weight, y, self.hidden_size, self.eps,
         )
         if residual is None:
             return y
