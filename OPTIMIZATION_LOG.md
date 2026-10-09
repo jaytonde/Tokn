@@ -9,7 +9,7 @@
 | 2 | fused Triton RoPE kernel | 446.12 | 116.36 | 6.03 | 0.97x |
 | 3 | threaded run_loop step + RMSNorm tail fusion + lm_head-in-graph + sync removal | 456.57 | 94.27 | 5.53 | 0.997x |
 | 4 | drop GPU round-trip in add_async_request tokenization | 456.70 | 95.77 | 5.53 | 0.998x |
-| 5 | fuse RMSNorm convert+residual-add, fold rsqrt into tail | 459.59 | 61.06 | 4.66 | 1.004x  MILESTONE (beats vLLM) |
+| 5 | fuse RMSNorm convert+residual-add, fold rsqrt into tail | 459.65 | 62.50 | 4.67 | 1.004x  MILESTONE (beats vLLM) |
 | - | vLLM 0.31.0 target (this machine, 2026-10-09) | 457.86 | 17.87 | 3.18 | 1.00x |
 
 ## Experiments tried
