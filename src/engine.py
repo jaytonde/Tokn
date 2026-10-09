@@ -97,7 +97,11 @@ class Engine:
             add_generation_prompt=True,
         )
 
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
+        # Keep the tokenized ids on CPU: they are only consumed as a Python list
+        # (Sequence.token_ids, block matching). Moving to GPU and back is a pure
+        # round-trip that also puts a GPU sync on the event-loop submission path,
+        # delaying subsequent arrivals on the benchmark.
+        model_inputs = self.tokenizer([text], return_tensors="pt")
         input_ids_tensor = model_inputs["input_ids"][0]
         input_ids = input_ids_tensor.tolist()
 
