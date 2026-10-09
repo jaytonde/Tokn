@@ -23,11 +23,17 @@ class Scheduler:
         scheduled = []
 
         # Decode active requests first to avoid starving in-flight generations.
+        # Refill a freed slot immediately: if a running request just finished
+        # (running below max) and requests are waiting, prefill now instead of
+        # waiting out the prefill interval, keeping the decode batch full.
         should_decode_first = (
             self.running
             and (
                 not self.waiting
-                or self.decode_steps_since_prefill < self.prefill_interval
+                or (
+                    len(self.running) >= self.max_num_seqs
+                    and self.decode_steps_since_prefill < self.prefill_interval
+                )
             )
         )
 

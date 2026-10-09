@@ -143,11 +143,25 @@ class Engine:
         while True:
             if self.scheduler.is_finished():
                 self.has_work.clear()
-                await self.has_work.wait()
-                continue
+                # A request may have been submitted between the is_finished()
+                # check and the clear(): add_async_request sets has_work after
+                # scheduler.add, so clearing here would drop that wakeup and the
+                # request would sit in the queue until the next arrival. Re-check
+                # after clearing; only sleep if it is still empty.
+                if self.scheduler.is_finished():
+                    await self.has_work.wait()
+                    continue
+                # Work appeared in the window; fall through and step.
 
             try:
-                finished = self.step()
+                # Run the (blocking, GPU-syncing) step in a worker thread so the
+                # event loop stays free to service request submissions on time.
+                # Without this, the ~5.5ms synchronous step starves the
+                # submission coroutine and arrivals drift late by several
+                # seconds over a 400-request run, inflating end-to-end latency.
+                finished = await asyncio.get_running_loop().run_in_executor(
+                    None, self.step
+                )
 
                 for seq in finished:
                     output_ids = seq.token_ids[seq.num_prompt_tokens:]
@@ -156,7 +170,7 @@ class Engine:
                         output_ids,
                         skip_special_tokens=True,
                     )
-                    text = text.split("</think>")[-1]
+                    text = text.split(" response")[-1]
 
                     async with self.request_lock:
                         state = self.request_states.get(seq.seq_id)

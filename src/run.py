@@ -247,7 +247,7 @@ class Run:
         slot_mapping   = torch.zeros(max_bs, dtype=torch.int32, device=device)
         context_lens   = torch.zeros(max_bs, dtype=torch.int32, device=device)
         block_tables   = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device=device)
-        outputs        = torch.zeros(max_bs, hidden_size, dtype=self.dtype, device=device)
+        outputs        = torch.zeros(max_bs, self.hf_config.vocab_size, dtype=self.dtype, device=device)
 
         self.graph_bs  = [bs for bs in (1,2,3,4) if bs <= max_bs]
 
@@ -265,9 +265,11 @@ class Run:
             )
 
             # Warmup run (lazy allocs / autotune happen OUTSIDE the graph).
-            outputs[:bs] = self.custom_model.model(input_ids[:bs], positions[:bs])
+            # Capture the full forward INCLUDING lm_head so the logits GEMM
+            # runs inside the graph instead of eagerly every decode step.
+            outputs[:bs] = self.custom_model(input_ids[:bs], positions[:bs])
             with torch.cuda.graph(graph, self.graph_pool):
-                outputs[:bs] = self.custom_model.model(input_ids[:bs], positions[:bs])
+                outputs[:bs] = self.custom_model(input_ids[:bs], positions[:bs])
 
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
@@ -306,7 +308,7 @@ class Run:
 
         graph.replay()
 
-        return self.custom_model.compute_logits(gv["outputs"][:bs])
+        return gv["outputs"][:bs]
 
     def run(self, seqs: list, is_prefill: bool):
         if is_prefill:
@@ -327,7 +329,7 @@ class Run:
     def prepare_prefill(self, seqs):
         input_ids = []
         positions = []
-        slot_mapping = []
+        seq_rows = []
         cu_seqlens_q = [0]
         cu_seqlens_k = [0]
         block_tables = []
@@ -335,7 +337,7 @@ class Run:
         max_seqlen_q = 0
         max_seqlen_k = 0
 
-        for seq in seqs:
+        for seq_i, seq in enumerate(seqs):
             start = seq.num_cached_tokens
             end = start + seq.num_scheduled_tokens
 
@@ -343,22 +345,22 @@ class Run:
 
             input_ids.extend(tokens)
             positions.extend(range(start, end))
+            seq_rows.extend([seq_i] * len(tokens))
             cu_seqlens_q.append(cu_seqlens_q[-1] + len(tokens))
             cu_seqlens_k.append(cu_seqlens_k[-1] + end)
             max_seqlen_q = max(max_seqlen_q, len(tokens))
             max_seqlen_k = max(max_seqlen_k, end)
 
-            for pos in range(start, end):
-                logical_block_id = pos // self.block_size
-                block_offset = pos % self.block_size
-                physical_block_id = seq.block_table[0, logical_block_id].item()
-                slot = physical_block_id * self.block_size + block_offset
-                slot_mapping.append(slot)
-
-            block_tables.append(seq.block_table.squeeze(0).tolist())
-
-        max_blocks = self.max_num_blocks
-        block_tables = [x + [-1] * (max_blocks - len(x)) for x in block_tables]
+            # GPU stack of per-seq block tables (no .tolist() sync), padded so
+            # all rows have the same width.
+            bt_row = seq.block_table[0]
+            if bt_row.size(0) < self.max_num_blocks:
+                pad = torch.full(
+                    (self.max_num_blocks - bt_row.size(0),),
+                    -1, dtype=torch.int32, device=self.device,
+                )
+                bt_row = torch.cat([bt_row, pad], dim=0)
+            block_tables.append(bt_row)
 
         device = torch.device(self.device)
 
@@ -366,8 +368,14 @@ class Run:
         positions = torch.tensor(positions, dtype=torch.long, device=device)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, device=device)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, device=device)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, device=device)
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, device=device)
+
+        bt = torch.stack(block_tables, dim=0)  # (num_seqs, max_num_blocks)
+
+        # Slots entirely on GPU (integer arithmetic, matches the old .item() path).
+        logical_ids = positions // self.block_size
+        offsets = positions % self.block_size
+        row_ids = torch.tensor(seq_rows, dtype=torch.long, device=device)
+        slot_mapping = (bt[row_ids, logical_ids] * self.block_size + offsets).to(torch.int32)
 
         set_context(
             is_prefill=True,
@@ -376,7 +384,7 @@ class Run:
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             slot_mapping=slot_mapping,
-            block_tables=block_tables,
+            block_tables=bt,
         )
 
         return input_ids, positions
@@ -384,7 +392,6 @@ class Run:
     def prepare_decode(self, seqs):
         input_ids = []
         positions = []
-        slot_mapping = []
         context_lens = []
         block_tables = []
 
@@ -395,31 +402,34 @@ class Run:
             positions.append(pos)
             context_lens.append(len(seq.token_ids))
 
-            logical_block_id = pos // self.block_size
-            block_offset = pos % self.block_size
-            physical_block_id = seq.block_table[0, logical_block_id].item()
-            slot = physical_block_id * self.block_size + block_offset
-            slot_mapping.append(slot)
-
-            block_tables.append(seq.block_table.squeeze(0).tolist())
-
-        max_blocks = self.max_num_blocks
-
-        block_tables = [x + [-1] * (max_blocks - len(x)) for x in block_tables] #wht?
+            bt_row = seq.block_table[0]
+            if bt_row.size(0) < self.max_num_blocks:
+                pad = torch.full(
+                    (self.max_num_blocks - bt_row.size(0),),
+                    -1, dtype=torch.int32, device=self.device,
+                )
+                bt_row = torch.cat([bt_row, pad], dim=0)
+            block_tables.append(bt_row)
 
         device = torch.device(self.device)
 
         input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
         positions = torch.tensor(positions, dtype=torch.long, device=device)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, device=device)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, device=device)
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, device=device)
+
+        bt = torch.stack(block_tables, dim=0)  # (bs, max_num_blocks)
+
+        # Slots entirely on GPU (no .item() syncs per step).
+        logical_ids = positions // self.block_size
+        offsets = positions % self.block_size
+        row_ids = torch.arange(positions.size(0), device=device)
+        slot_mapping = (bt[row_ids, logical_ids] * self.block_size + offsets).to(torch.int32)
 
         set_context(
             is_prefill=False,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
-            block_tables=block_tables,
+            block_tables=bt,
         )
 
         return input_ids, positions
