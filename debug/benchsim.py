@@ -95,7 +95,8 @@ def main():
             sched_times.append(_t_sched)
         # arrival delay stats
         lat = [arrival_times[i]-t0 - sched_times[i] for i in range(len(seq_ids))]
-        print(f"arrival delay: last={lat[-1]:.3f}s  mean={sum(lat)/len(lat):.3f}s", flush=True)
+        print(f"arrival delay: last={lat[-1]:.3f}s  mean={sum(lat)/len(lat):.3f}s  "
+              f"sum_submit={t_submit:.3f}s", flush=True)
         states = [engine.request_states[s] for s in seq_ids]
         # last request's timeline
         last = states[-1].seq

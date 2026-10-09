@@ -105,9 +105,23 @@
 - Why it worked: folding the (bit-identical) rsqrt into the tail and fusing the elementwise convert+add removed ~3 kernels x 113 RMSNorm calls/step.
 - Worth retrying? NO.
 
+## [10] 2026-10-09 17:10  Pre-allocated decode buffers (REVERTED - slower)
+- Hypothesis: avoid per-step torch.tensor allocation in prepare_decode.
+- Change: pre-allocated _dec_* buffers in Run; per-element GPU writes in prepare_decode.
+- Result: prepare wall time INCREASED (stepprof 0.79ms -> 1.26ms) because per-element scalar GPU writes (self._dec_input_ids[i] = int) are more expensive than one batched torch.tensor H2D for bs<=5.
+- Outcome: REVERTED. The batched tensor approach stays.
+
+## [11] 2026-10-09 17:15  Keep slot arithmetic in int32 (KEPT, neutral)
+- Avoid int64 promotion+cast in slot_mapping computation. Bit-identical (0/37). Benchmark-neutral (459.33 tok/s).
+
 ## Backlog
 
-- (to be filled)
+- Fused MLP (gate_up + silu + down in one kernel) and fused QKV GEMM: would cut ~1ms/step of the decode GEMM time. BLOCKED by the bs-1 bit-identity gate (Triton GEMM accumulation differs from cuBLAS -> flips near-tie tokens). Could be retried IF the gate is satisfied via matching reduction, or with torch.compile fusions that preserve tokens.
+- Full RMSNorm var fusion (fold pow+mean into Triton): ~0.5ms/step. BLOCKED: Triton sum reduction differs from torch's mean_kernel; no reshape/num_warps combination matched (debug/redmatch.py). Retry only with exact reduction matching.
+- Reduce run_loop per-step event-loop overhead (~8.5us/step, ~0.28s over 400-request run) to shrink residual arrival delay. Small.
+- Reduce TTFT tail (p99 ~600ms, 3.4x vLLM): admit prefills faster during bursts or interleave prefill+decode (mixed batching). Larger change.
+- Flash attention splitkv path: contexts in benchmark are short; splitkv adds a combine kernel (~0.18ms/step). Investigate forcing the non-split path.
+- The benchmark is arrival-bound; throughput is near the ceiling (~461 tok/s theoretical). Further decode gains mostly improve TPOT/ITL and the tail, not the headline throughput.
 
 ## [loop] 2026-10-09 13:07  Session 1 ended without a status line
 - Outcome: SESSION CRASHED or cut off. Transcript: debug/opencode_runs/iter_001_20261009_124714.log
