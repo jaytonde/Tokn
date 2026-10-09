@@ -121,6 +121,31 @@ class BlockManager:
 
         return matched_blocks
 
+    def num_free_blocks_needed(self, token_ids: list[int], num_cached_blocks: int) -> int:
+        """
+        How many blocks allocate() would take from the free list.
+
+        New suffix blocks always come from the free list. A matched prefix block
+        also does when nobody is using it right now (ref_count 0), because
+        allocate() pulls it back out of the free list.
+        """
+        needed = self._num_blocks(token_ids) - num_cached_blocks
+        prev_hash = -1
+
+        for block_idx in range(num_cached_blocks):
+            block_tokens = self._block_tokens(token_ids, block_idx)
+            block_hash = self.compute_hash(block_tokens, prev_hash)
+
+            if self.hash_to_block_id[block_hash] not in self.used_block_ids:
+                needed += 1
+
+            prev_hash = block_hash
+
+        return needed
+
+    def can_allocate(self, token_ids: list[int], num_cached_blocks: int) -> bool:
+        return self.num_free_blocks_needed(token_ids, num_cached_blocks) <= len(self.free_block_ids)
+
     def allocate(self, token_ids: list[int], num_cached_blocks: int) -> list[int]:
 
         """

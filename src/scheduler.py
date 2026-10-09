@@ -45,22 +45,42 @@ class Scheduler:
         if self.waiting:
             num_batched_tokens = 0
 
-            while self.waiting and len(scheduled) < self.max_num_seqs:
-                seq = self.waiting[0]
+            # Sequences that already hold KV blocks: running ones, plus chunked
+            # prefills waiting for their next chunk. The KV cache is sized for
+            # max_num_seqs of them, so new requests are only admitted below that
+            # count and only when their blocks are actually free. Without this,
+            # steady arrivals exhaust the cache and allocate() raises.
+            num_active = len(self.running) + sum(1 for s in self.waiting if s.block_table is not None)
+            admit_new = True
+
+            for seq in list(self.waiting):
+                if len(scheduled) >= self.max_num_seqs:
+                    break
 
                 if seq.block_table is None:
-                    cached_blocks         = self.block_manager.match_prefix(seq.token_ids)
-                    alloc_token_ids       = seq.token_ids + ([0] * seq.max_tokens)
+                    if not admit_new:
+                        # Keep FIFO order among new requests, but still let
+                        # already-admitted chunked prefills further back proceed.
+                        continue
+
+                    cached_blocks   = self.block_manager.match_prefix(seq.token_ids)
+                    alloc_token_ids = seq.token_ids + ([0] * seq.max_tokens)
+
+                    if num_active >= self.max_num_seqs or not self.block_manager.can_allocate(alloc_token_ids, cached_blocks):
+                        admit_new = False
+                        continue
+
                     block_table_ids       = self.block_manager.allocate(token_ids=alloc_token_ids, num_cached_blocks=cached_blocks)
                     seq.block_table_ids   = block_table_ids
                     seq.block_table       = self.block_manager.make_block_table_tensor(block_table=block_table_ids,device=self.device)
                     seq.num_cached_tokens = cached_blocks * self.block_manager.block_size
                     seq.num_hashed_blocks = cached_blocks
+                    num_active += 1
 
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
 
                 if num_tokens <= 0:
-                    self.waiting.popleft()
+                    self.waiting.remove(seq)
                     seq.status = "RUNNING"
                     seq.num_scheduled_tokens = 0
                     self.running.append(seq)
@@ -73,10 +93,7 @@ class Scheduler:
                 # Chunk large prefill requests so they fit token budget.
                 num_tokens = min(num_tokens, budget_left)
 
-                if num_batched_tokens + num_tokens > self.max_num_batched_tokens:
-                    break
-
-                self.waiting.popleft()
+                self.waiting.remove(seq)
                 seq.status = "PREFILL"
                 seq.num_scheduled_tokens = num_tokens
 
@@ -86,6 +103,17 @@ class Scheduler:
             if scheduled:
                 self.decode_steps_since_prefill = 0
                 return scheduled, True
+
+        # Nothing could be prefilled (cache full or at max_num_seqs): keep
+        # decoding so running sequences finish and free their blocks.
+        if self.running:
+            while self.running and len(scheduled) < self.max_num_seqs:
+                seq = self.running.popleft()
+                seq.num_scheduled_tokens = 1
+                scheduled.append(seq)
+
+            self.decode_steps_since_prefill += 1
+            return scheduled, False
 
         return scheduled, False
      

@@ -8,8 +8,10 @@ python serve.py --model Qwen/Qwen3-0.6B --dtype bf16 --max_length 2048 --device 
 # --------------------------------------------------------------------------- #
 
 # tokn  (uses inference_optimization conda env, clears conflicting bashrc CUDA paths)
+cd /home/Tokn
 env -u LD_LIBRARY_PATH -u CUDA_HOME -u CUDA_PATH \
-	/data1/miniconda3/envs/inference_optimization/bin/python benchmark.py \
+	PYTHONPATH=/home/Tokn \
+	/home/Tokn/.venv/bin/python debug/benchmark.py \
 	--framework tokn \
 	--model Qwen/Qwen3-0.6B \
 	--dtype bf16 \
@@ -19,6 +21,7 @@ env -u LD_LIBRARY_PATH -u CUDA_HOME -u CUDA_PATH \
 	--questions data/questions.jsonl \
 	--num-prompts 400 \
 	--request-rate 2
+
 
 # vLLM  (uses vllm_env conda env)
 /data1/home/mahek.shah/conda-envs/vllm_env/bin/python benchmark.py \

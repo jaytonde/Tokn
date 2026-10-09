@@ -162,7 +162,15 @@ def run_tokn(args) -> dict:
             seq_ids.append(seq_id)
 
         states = [llm.request_states[seq_id] for seq_id in seq_ids]
-        await asyncio.gather(*(state.done.wait() for state in states))
+        all_done = asyncio.ensure_future(asyncio.gather(*(state.done.wait() for state in states)))
+
+        # run_loop never returns on its own, so if it finishes first it crashed.
+        # Surface that error instead of waiting forever on requests it will never serve.
+        await asyncio.wait({all_done, llm.background_task}, return_when=asyncio.FIRST_COMPLETED)
+        if not all_done.done():
+            all_done.cancel()
+            llm.background_task.result()  # re-raises the run_loop exception
+            raise RuntimeError("tokn run_loop stopped before all requests finished")
 
         for state in states:
             if state.error is not None:

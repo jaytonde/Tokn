@@ -78,8 +78,8 @@ class Engine:
         self.background_task = None
 
         self.scheduler = Scheduler(
-            max_num_seqs=5,
-            max_num_batched_tokens=1024,
+            max_num_seqs=config.max_num_seqs,
+            max_num_batched_tokens=config.max_num_batched_tokens,
             eos_token_id=self.tokenizer.eos_token_id,
             block_manager=self.block_manager,
             device=self.device,
@@ -165,6 +165,7 @@ class Engine:
                             state.done.set()
 
             except Exception as exc:
+                logger.exception("run_loop failed; failing all pending requests")
                 async with self.request_lock:
                     for state in self.request_states.values():
                         state.error = exc
