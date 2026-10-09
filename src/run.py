@@ -372,10 +372,10 @@ class Run:
         bt = torch.stack(block_tables, dim=0)  # (num_seqs, max_num_blocks)
 
         # Slots entirely on GPU (integer arithmetic, matches the old .item() path).
-        logical_ids = positions // self.block_size
-        offsets = positions % self.block_size
+        logical_ids = positions // self.block_size          # int64, for indexing
+        offsets = (positions % self.block_size).to(torch.int32)
         row_ids = torch.tensor(seq_rows, dtype=torch.long, device=device)
-        slot_mapping = (bt[row_ids, logical_ids] * self.block_size + offsets).to(torch.int32)
+        slot_mapping = bt[row_ids, logical_ids] * self.block_size + offsets  # int32
 
         set_context(
             is_prefill=True,
@@ -420,10 +420,10 @@ class Run:
         bt = torch.stack(block_tables, dim=0)  # (bs, max_num_blocks)
 
         # Slots entirely on GPU (no .item() syncs per step).
-        logical_ids = positions // self.block_size
-        offsets = positions % self.block_size
+        logical_ids = positions // self.block_size          # int64, for indexing
+        offsets = (positions % self.block_size).to(torch.int32)
         row_ids = torch.arange(positions.size(0), device=device)
-        slot_mapping = (bt[row_ids, logical_ids] * self.block_size + offsets).to(torch.int32)
+        slot_mapping = bt[row_ids, logical_ids] * self.block_size + offsets  # int32
 
         set_context(
             is_prefill=False,
