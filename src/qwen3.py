@@ -6,7 +6,7 @@ from transformers import Qwen3Config
 
 from layers.activation import SiluAndMul
 from layers.attention import Attention
-from layers.layernorm import RMSNorm
+from layers.layernorm import RMSNorm, QKNorm
 from layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from layers.rotary_embedding import get_rope
 from layers.embed_head import VocabParallelEmbedding, ParallelLMHead
@@ -68,8 +68,14 @@ class Qwen3Attention(nn.Module):
             self.num_kv_heads,
         )
         if not self.qkv_bias:
+            self.qk_norm = QKNorm(self.head_dim, eps=rms_norm_eps)
+            # Keep q_norm/k_norm as submodule aliases (shared Parameter storage)
+            # so utils/loader.load_model finds the checkpoint's
+            # q_norm.weight / k_norm.weight tensors and loads into them.
             self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+            self.q_norm.weight = self.qk_norm.w_q
+            self.k_norm.weight = self.qk_norm.w_k
 
     def forward(
         self,
@@ -83,8 +89,7 @@ class Qwen3Attention(nn.Module):
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         if not self.qkv_bias:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
+            q, k = self.qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v)
         output = self.o_proj(o.flatten(1, -1))
