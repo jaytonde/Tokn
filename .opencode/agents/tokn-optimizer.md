@@ -33,6 +33,9 @@ Make Tokn as fast as possible on the standard benchmark, on every metric: throug
 # Process hygiene (these mistakes cost hours before)
 - Kill leftovers before any run, with exactly these patterns. Keep the square brackets, because without them pkill matches your own shell command and kills it:
   pkill -f "[d]ebug/benchmark.py"; pkill -f "[c]ompile_worker"
+- Run that pkill line as its own bash tool call, with nothing else in the same command. pkill -f matches the full command line of every process, including the shell running your tool call. If the same command also mentions the script name anywhere (for example "pkill ...; timeout 1500 ... debug/benchmark.py ..."), pkill kills your own shell, the benchmark never starts, and the tool call hangs until its timeout. This has cost about 25 minutes twice. The same applies to any pkill -f or pgrep -f pattern: never combine it with a command that contains the matched text.
+- Never change how Engine.run_loop post-processes output text (the split on "</think>"). The correctness gate compares token ids, so it cannot catch a broken text change.
+- The engine step runs in a worker thread (run_in_executor) while add_async_request runs on the event loop. Any code that touches scheduler.waiting or scheduler.running must hold scheduler.lock (a threading.Lock). Never remove that lock or the per-step `await asyncio.sleep(0)` in run_loop.
 - A leftover Tokn process holds port 2333, and the next run fails with EADDRINUSE.
 - Never kill processes you did not start, such as serve.py. If one holds the GPU or port 2333, stop and report GOAL_BLOCKED.
 - Run benchmarks in the foreground with timeout. Never use nohup, setsid or & for benchmarks. If GPU utilization stays at 0% and the process CPU time stops increasing for 2 minutes, it is hung: kill it and log it.

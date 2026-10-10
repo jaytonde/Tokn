@@ -1,3 +1,4 @@
+import threading
 from collections import deque
 
 class Scheduler:
@@ -16,10 +17,16 @@ class Scheduler:
         self.decode_steps_since_prefill = 0
         self.prefill_interval = 8
 
-    def add(self, seq):
-        self.waiting.append(seq)
+        # Engine.step runs schedule()/postprocess() in a worker thread while
+        # add() runs on the asyncio event loop thread. Both mutate the waiting
+        # and running deques, so every access goes through this lock.
+        self.lock = threading.Lock()
 
-    def schedule(self):
+    def add(self, seq):
+        with self.lock:
+            self.waiting.append(seq)
+
+    def _schedule_unlocked(self):
         scheduled = []
 
         # Decode active requests first to avoid starving in-flight generations.
@@ -123,10 +130,10 @@ class Scheduler:
 
         return scheduled, False
      
-    def is_finished(self):
+    def _is_finished_unlocked(self):
         return not self.waiting and not self.running
 
-    def postprocess(self, seqs, token_ids, is_prefill):
+    def _postprocess_unlocked(self, seqs, token_ids, is_prefill):
         finished = []
 
         for seq, token_id in zip(seqs, token_ids):
@@ -154,3 +161,15 @@ class Scheduler:
                 self.running.append(seq)
 
         return finished
+
+    def schedule(self):
+        with self.lock:
+            return self._schedule_unlocked()
+
+    def is_finished(self):
+        with self.lock:
+            return self._is_finished_unlocked()
+
+    def postprocess(self, seqs, token_ids, is_prefill):
+        with self.lock:
+            return self._postprocess_unlocked(seqs, token_ids, is_prefill)

@@ -174,7 +174,7 @@ class Engine:
                         output_ids,
                         skip_special_tokens=True,
                     )
-                    text = text.split(" response")[-1]
+                    text = text.split("</think>")[-1]
 
                     async with self.request_lock:
                         state = self.request_states.get(seq.seq_id)
