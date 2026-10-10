@@ -324,9 +324,10 @@ class Engine:
 
         with torch.inference_mode():
             # The tokens were written into tbuf_tok by the graph's in-graph
-            # argmax (exp 47); read them back after the wait (pure D2H, no sync
-            # - the GPU has finished). tbuf_tok is int32; token ids fit.
-            next_token_ids = self.RUN.graph_vars["tbuf_tok"][:len(seqs)].tolist()
+            # argmax (exp 47) and D2H-copied into the pinned _pin_tok mirror
+            # (exp 53); read them from the pinned numpy view after the wait
+            # (pure CPU read, no GPU sync - the D2H completed with the graph).
+            next_token_ids = self.RUN._pin_tok_np[:len(seqs)].tolist()
             finished = self.scheduler.postprocess(seqs, next_token_ids, False)
 
         for seq in seqs:

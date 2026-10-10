@@ -275,6 +275,13 @@ class Run:
         #                 only rewrites tbuf_tok.
         tbuf_tok       = torch.zeros(max_bs, dtype=torch.int32, device=device)
         tbuf_state     = torch.zeros(max_bs, 3 + max_num_blocks, dtype=torch.int32, device=device)
+        # Pinned CPU mirror of the in-graph argmax output (exp 53): each decode
+        # graph's last op D2H-copies tbuf_tok[:bs] into this pinned buffer, so
+        # the engine reads the next tokens with a ~0.3us numpy read instead of
+        # a ~37us GPU-syncing .tolist() after the wait. The D2H runs on the
+        # stream right after the argmax, so it is complete when the busy-poll
+        # event fires (~8-15us GPU on the critical path).
+        pin_tok        = torch.zeros(max_bs, dtype=torch.int32, device="cpu", pin_memory=True)
         g_input        = torch.zeros(max_bs, dtype=torch.long,  device=device)
         g_pos          = torch.zeros(max_bs, dtype=torch.long,  device=device)
         g_slot         = torch.zeros(max_bs, dtype=torch.int32, device=device)
@@ -347,6 +354,7 @@ class Run:
                     block_tables[:bs] = tbuf_state[:bs, 3:3 + max_num_blocks]
                     outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
                     tbuf_tok[:bs] = torch.argmax(outputs[:bs], dim=-1)
+                    pin_tok[:bs].copy_(tbuf_tok[:bs], non_blocking=True)
 
                 if self.graph_pool is None:
                     self.graph_pool = graph.pool()
@@ -365,6 +373,8 @@ class Run:
             block_tables=block_tables,
             outputs=outputs
         )
+        self._pin_tok = pin_tok
+        self._pin_tok_np = pin_tok.numpy()
 
     def run_model(self, input_ids, positions, is_prefill):
 
