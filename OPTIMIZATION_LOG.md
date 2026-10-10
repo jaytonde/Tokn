@@ -29,6 +29,7 @@
 | 13 | CUDA-graph prefill: pre-captured exact-shape graphs (eager prefill host-bound ~40ms/step) | graphs | KEPT | ~0 (TTFT 54->20ms) | eager prefill = 680 kernel launches at ~66us each (~40ms) for only ~7ms GPU; exact-shape graph replay is 8ms and bit-identical. TTFT mean 54->20ms, TPOT 4.47->4.27ms |
 | 14 | decode flash single-pass (num_splits=1) for seqlen<=256 via dual-graph hybrid | kernel | KEPT | ~0 (TPOT -4.2%, TTFT -19%) | splitkv path costs split+combine kernels (~700us/step at bs=5); single-pass kernel is bit-identical for seqlen<=256 and ~7us/call faster. Dual-graph hybrid keeps splitkv for seqlen>256 (reference) -> gate passes. TPOT 4.28->4.11, TTFT 19.9->17.7 |
 | 15 | merge q_norm+k_norm into one fused QKNorm call (3 kernels/layer instead of 6) | kernel | KEPT | ~0 (TPOT -3.5%, TTFT -25%) | q_norm+k_norm are 56 tiny RMSNorm calls (~583us/step) dominated by fixed per-call kernel cost; merging rows into one convert+mean+scale (per-row-group weights) halves calls to 28. Per-row mean reduction unchanged -> bit-identical for bs>=2; bs=1 falls back to separate path (torch reduce config differs for 8-row k). TPOT 4.11->3.99, TTFT 17.7->13.3 |
+| 16 | flash_attn_with_kvcache in-kernel KV store (drop store_kvcache kernel) | kernel | REVERTED (FAILED correctness) | - | passing k/v to flash stores cache in-kernel and skips the 84us store_kvcache kernel (~51us/step faster); but flash computes the new token's attention from registers instead of re-reading the bf16 cache -> maxdiff 1e-3, 11/37 bs=1 sequences differ. Not bit-identical, fails gate |
 
 ## Details
 
@@ -173,6 +174,17 @@
 - Outcome: KEPT
 - Why it worked: per-row mean reduction is independent of row count (same reduce kernel for the rows), so merging q+k rows into one tensor keeps per-row numerics identical for bs>=2; the fallback covers the one shape (bs=1, 8 k-rows) where torch's reduce config changes. Halved the fixed kernel cost of the two smallest norm calls.
 - Worth retrying? NO (done).
+
+## [16] 2026-10-10 07:20  Flash in-kernel KV store (drop store_kvcache) (REVERTED - FAILED correctness)
+- Hypothesis and expected gain: the decode path calls a Triton store_kvcache kernel (84us/step profiler, ~51us eager) then flash_attn_with_kvcache reads the cache. flash_attn_with_kvcache accepts k/v and stores+attends in ONE kernel -> drop store_kvcache, ~50-84us/step saved.
+- Profile evidence: debug/inkernel_kv.py: A(store+flash)=71.7us vs B(in-kernel)=20.3us at bs=5 (~51us saved); kc/vc caches end up bit-identical, BUT attention output differs maxdiff 1e-3..3.5e-3 (flash uses the k/v from registers for the new token instead of re-reading the bf16 cache).
+- Related earlier entries: none.
+- Change: layers/attention.py - decode passes k=k.unsqueeze(1), v=v.unsqueeze(1) to flash_attn_with_kvcache; store_kvcache kept only for prefill. REVERTED.
+- Correctness: FAIL - 11/37 bs=1 sequences differ (even short contexts; the register-vs-cache numerics flip near-tie tokens).
+- Benchmark: NOT RUN (failed gate).
+- Outcome: REVERTED (FAILED - correctness)
+- Why it failed: the in-kernel store computes the freshly-written token's attention from the raw k/v argument rather than the stored bf16 cache value, which is a different numeric path (maxdiff up to 3.5e-3). Not bit-identical, so near-tie greedy tokens flip at bs=1.
+- Worth retrying? NO - the numerics are inherently different (register vs cache read).
 
 ## Backlog
 

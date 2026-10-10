@@ -58,7 +58,8 @@ def main():
                 gv["block_tables"].fill_(-1)
                 gv["block_tables"][:bs, :ctx.block_tables.size(1)] = ctx.block_tables
                 e1.record()
-                run.graphs[next(x for x in run.graph_bs if x >= bs)].replay()
+                pool = run.graphs_fast if ctx.use_fast_flash else run.graphs
+                pool[next(x for x in run.graph_bs if x >= bs)].replay()
                 e2.record()
                 logits = gv["outputs"][:bs]
                 e3.record()
