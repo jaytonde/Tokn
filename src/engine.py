@@ -163,7 +163,7 @@ class Engine:
                 # Without this, the ~5.5ms synchronous step starves the
                 # submission coroutine and arrivals drift late by several
                 # seconds over a 400-request run, inflating end-to-end latency.
-                mode = os.environ.get("TOKN_STEP_MODE", "executor")
+                mode = os.environ.get("TOKN_STEP_MODE", "split")
                 if mode == "split":
                     # Decode steps enqueue on the event loop (keeps arrivals
                     # on time) with only the GPU wait off-loaded; prefill
