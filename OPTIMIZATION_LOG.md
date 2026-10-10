@@ -20,6 +20,7 @@
 | 12 | QKNorm reads strided q/k from qkv output (drop 56 copy kernels) | 459.07 | 9.27 | 3.64 | 1.003x |
 | 13 | merge q+k rotary into one kernel launch | 460.10 | 8.77 | 3.62 | 1.005x |
 | 14 | fuse qk-norm scale into rotary kernel (scale+rotate) | 460.13 | 9.39 | 3.57 | 1.005x |
+| 15 | single-tensor prepare_decode (one H2D in graph mode) | 459.51 | 8.93 | 3.52 | 1.004x |
 
 ## Experiments tried
 
@@ -42,6 +43,7 @@
 | 21 | merge q+k rotary into one kernel launch | kernel | KEPT | ~0 (TPOT -0.8%, TTFT -11%) | rotary was 2 kernels/layer (q and k separately) = 56/step; merged into one launch mapping head -> q or k tensor (same cos/sin lookup, same math) -> 28 kernels/step. Bit-identical. decode_time 3184->3146us. TPOT 3.64->3.62, TTFT 9.3->8.8. Throughput 460.1 (1.005x vLLM) |
 | 22 | skip graph-vars fills when batch is full (bs==max_num_seqs) | sync | REVERTED (no gain) | ~0 | bs=5 steps are rare in the benchmark (steady state ~2 concurrent per Little's law), so skipping the 3 fills on full batches is neutral. Two runs TPOT 3.64/3.59 (avg 3.615) vs baseline 3.61/3.62. No gain, reverted for simplicity. |
 | 23 | fuse qk-norm scale into rotary kernel (scale+rotate in one launch) | kernel | KEPT | ~0 (TPOT -1.4%, TTFT +) | QKNorm (bs>=2) now emits fp32 xf/var via prepare(); a new scale_rotate_kernel does the RMSNorm scale AND RoPE in one launch (was qk_scale 28 kernels + rotary 28 = 56 -> 28). Bit-identical (bf16 roundings match qk_scale exactly). decode_time 3136->3089us. TPOT 3.62->3.57, throughput 460.5 (1.006x vLLM) |
+| 24 | single-tensor prepare_decode (one H2D in graph mode) | sync | KEPT | ~0 (TPOT -1.3%) | prepare built 4 GPU tensors (input_ids/positions/context_lens/slot_mapping) = 4 H2D dispatches (~100us). Graph mode now builds one (bs,4) int32 tensor + strided column views (the graph-vars copies handle strides and int32->long casts); eager mode keeps the contiguous path. prepare 0.12->0.08ms. TPOT 3.57->3.52, TTFT 9.4->8.9 |
 
 ## Details
 
@@ -248,6 +250,19 @@
 - Gap to vLLM now: throughput 1.006x, TPOT 1.12x (was 1.14x), TTFT 0.53x
 - Outcome: KEPT
 - Why it worked: scale and rotary are sequential on the same values with no other consumer between them; doing both in one kernel removes a launch and a memory round-trip (scaled q/k no longer written to global then re-read). The bf16 rounding must happen at the same points as the old two kernels (round after scale, fp32 rotary math, round at store).
+- Worth retrying? NO (done).
+
+## [24] 2026-10-10 09:45  Single-tensor prepare_decode in graph mode (KEPT)
+- Hypothesis and expected gain: the per-step exposed CPU (prepare 0.14ms + replay-launch 0.11ms) is now the biggest remaining lever; the GPU replay (~3.09ms) is already below vLLM's TPOT (3.18). prepare built 4 GPU tensors via torch.tensor (4 H2D dispatches ~100us). Building one (bs,4) int32 tensor and slicing columns saves 3 dispatches.
+- Profile evidence: cProfile: prepare_decode 4 torch.tensor calls = 0.10ms of the 0.12ms. After change: 0.083ms measured. TPOT 3.57->3.52 (2 runs: 3.54/3.51).
+- Related earlier entries: [17] (prepare optimizations), [4].
+- Change: src/run.py - prepare_decode builds a (bs,4) int32 tensor in graph mode (enforce_eager=False) and returns strided column views; run_model's graph-vars copies handle the strides and int32->long casts for input_ids/positions. Eager mode keeps the contiguous 4-tensor path. commit 0eed511.
+- Correctness: PASS - bs=1 graph 0/37 vs reference; batched run1 vs run2 0/37; eager bs=1 0/37 vs old eager reference (contiguous path preserved).
+- Benchmark before (exp 23): 460.48/459.78 tok/s, TTFT 8.73/10.04, TPOT 3.55/3.59, ITL 3.55/3.59
+- Benchmark after (2 runs): 459.62/459.39 tok/s, TTFT 8.38/9.48 (p99 160/196), TPOT 3.54/3.51 (p99 3.73/3.75), ITL 3.54/3.52
+- Gap to vLLM now: throughput 1.004x, TPOT 1.11x (was 1.12x), TTFT 0.50x
+- Outcome: KEPT
+- Why it worked: the four small tensors shared one H2D + column slices; the graph path only needs the values in the contiguous gv buffers (copied by run_model), so strided int32 intermediates are harmless there. Kept a contiguous path for eager mode where store_kvcache/flash read context tensors directly.
 - Worth retrying? NO (done).
 
 ## Backlog
