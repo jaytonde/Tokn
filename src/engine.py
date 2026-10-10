@@ -280,9 +280,17 @@ class Engine:
             ev = torch.cuda.Event()
             ev.record()
 
-        # Wait for the GPU without blocking the event loop. The executor task
-        # is a single C call (no Python), so there is no GIL contention.
-        await loop.run_in_executor(None, ev.synchronize)
+        # Wait for the GPU without blocking the event loop. Poll the event
+        # instead of delegating to the executor: run_in_executor(None,
+        # ev.synchronize) costs ~0.1-0.4ms/step of thread-wakeup + future
+        # round-trip (debug/execwait_probe.py: run_in_executor 1.62ms vs
+        # busy-query 1.33ms p50 on the same 1.7ms GPU event). ev.query() is a
+        # cheap non-blocking host call, and awaiting asyncio.sleep(0) each
+        # iteration keeps the loop free to service arrivals on time, so
+        # throughput and TTFT are unaffected (unlike the fully-inline mode
+        # which blocked on ev.synchronize and starved arrivals, exp 28).
+        while not ev.query():
+            await asyncio.sleep(0)
 
         with torch.inference_mode():
             next_token_ids = tokens_t.tolist()
