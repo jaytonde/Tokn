@@ -53,22 +53,33 @@ def rms_scale_kernel(
 
 @triton.jit
 def qk_convert_kernel(
-    q_ptr, k_ptr,      # bf16 (nq, D), (nk, D)
+    q_ptr, k_ptr,      # bf16 q (bs,nqh,D) / k (bs,nkvh,D), row-strided
     xf_ptr,            # fp32 out (total, D)
     x2_ptr,            # fp32 out (total, D): x*x
     n_q_rows,
+    q_heads,
+    q_stride,          # stride(0) of q
+    k_heads,
+    k_stride,          # stride(0) of k
     n_cols: tl.constexpr,
 ):
     """xf = row.to(f32); x2 = xf*xf, for q rows [0,nq) and k rows [nq,total).
 
-    One launch for both q and k norm converts; per-row identical to the
+    Reads q/k directly from their strided views (they are slices of the qkv
+    GEMM output, so dim-0 stride is 4096, not 2048); this avoids the
+    per-step reshape copy that makes them contiguous. Per-row identical to the
     separate RMSNorm convert (same values, same per-row reduction inputs)."""
     row = tl.program_id(0)
     offs = tl.arange(0, n_cols)
     if row < n_q_rows:
-        x = tl.load(q_ptr + row * n_cols + offs).to(tl.float32)
+        b = row // q_heads
+        h = row % q_heads
+        x = tl.load(q_ptr + b * q_stride + h * n_cols + offs).to(tl.float32)
     else:
-        x = tl.load(k_ptr + (row - n_q_rows) * n_cols + offs).to(tl.float32)
+        rr = row - n_q_rows
+        b = rr // k_heads
+        h = rr % k_heads
+        x = tl.load(k_ptr + b * k_stride + h * n_cols + offs).to(tl.float32)
     tl.store(xf_ptr + row * n_cols + offs, x)
     tl.store(x2_ptr + row * n_cols + offs, x * x)
 
@@ -141,11 +152,10 @@ class QKNorm(nn.Module):
                 self._rms_one(k, self.w_k).view(k.shape),
             )
         total = nq + nk
-        qf = q.reshape(-1, hd)
-        kf = k.reshape(-1, hd)
         xf = torch.empty(total, hd, dtype=torch.float32, device=q.device)
         x2 = torch.empty(total, hd, dtype=torch.float32, device=q.device)
-        qk_convert_kernel[(total,)](qf, kf, xf, x2, nq, hd)
+        qk_convert_kernel[(total,)](q, k, xf, x2, nq, q.shape[1], q.stride(0),
+                                    k.shape[1], k.stride(0), hd)
         var = x2.mean(dim=-1, keepdim=True)
         y = torch.empty(total, hd, dtype=q.dtype, device=q.device)
         qk_scale_kernel[(total,)](xf, var.view(total), self.w_q, self.w_k, y, nq, hd, self.eps)
