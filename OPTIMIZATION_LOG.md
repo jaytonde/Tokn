@@ -77,6 +77,7 @@
 | 45 | prefill GEMM M-scaling microbenchmark | kernel | REVERTED (no bit-identity-safe fix) | 0 | debug/gemmbench3.py: padding M 100->128 keeps SAME kernel AND same time (53.2us) but real rows NOT bit-identical (cuBLAS changes per-row accumulation with exact M); M=256 is SLOWER (74.8us, different 128x128 kernel). Larger M is both slower and non-identical -> no bit-identity-safe prefill GEMM speedup. |
 | 46 | batch queued prefills to raise prefill M | scheduler | ABANDONED | - | precluded by [45]: larger M slower + non-identical; scheduler already batches multi-seq prefills when several wait; TTFT p99 tail is admission-bound burst queueing, not prefill-M. |
 | 47 | in-graph greedy argmax: capture argmax as the LAST decode-graph op writing tbuf_tok, drop the per-step torch.argmax dispatch + the token H2D (GPU->CPU->GPU round-trip) | sync | KEPT | TPOT -4% (3.19->3.15), TTFT p99 -12% (~80->72) | the decode step did argmax (GPU kernel, on stream) then tolist (D2H) then postprocess, then the NEXT step H2D'd the token back into tbuf_tok (22us) + re-dispatched torch.argmax (17-29us). Capturing argmax in-graph costs no GPU time (kernel already on the stream) and removes both CPU costs; the engine reads tokens from tbuf_tok after the wait. Gates: bs=1 0/37, run_loop 0/37. 2 full runs: TPOT 3.15/3.15, TTFT 6.84/6.72 (p99 71.7/72.5), throughput 459.43/459.71 (ceiling). |
+| 48 | Triton GEMV to replace the o/down gemvx (23% of bs=1 decode) | kernel | REVERTED (no win) | 0 | debug/gemv_triton.py + gemv_tune.py: cuBLAS's gemvx order IS reproducible - a Triton sequential/chunk-tree GEMV is bit-identical (maxd=0) for EVERY BLOCK_N/BLOCK_K config (32..256 chunks), so the 2048-dot-product has slack. BUT every Triton config is ~2x SLOWER (30us vs 15.8us F.linear): Triton's (BLOCK_N,BLOCK_K) tile load + dispatch can't beat cuBLAS's 235GB/s GEMV on this shape, and more programs (small BLOCK_N) hit poor coalescing (matrix-vector). No config beat F.linear. |
 
 ## Details
 
@@ -560,6 +561,17 @@
 - Outcome: KEPT
 - Why it worked: the token round-trip GPU->CPU->GPU was pure waste; the graph's argmax (already on the critical stream) doubles as the next step's input write, so the CPU only ever READS the token (once, off the critical path). TPOT 3.19->3.15 is the first clear TPOT win over vLLM; TTFT p99 also improved (~80->72, faster step -> faster slot turnover during bursts). Throughput stays at the ceiling.
 - Worth retrying? The same pattern (a GPU-produced value that the CPU only consumes once) is fully exploited now. Next: the tolist (14us) is the last per-step token CPU cost and cannot be removed (scheduler needs CPU tokens).
+
+## [48] 2026-10-10 19:10  Triton GEMV for the o/down gemvx (REVERTED - no win)
+- Hypothesis and expected gain: the o/down projections at bs=1 are gemvx kernels, 56 calls/step = 862us (23% of the 3724us bs=1 decode, debug/kernel_dump.py), each ~15.4us reading 4MB = 235GB/s vs the 834 floor. If a Triton GEMV could reproduce cuBLAS's gemvx bit-for-bit AND stream the weight at higher bandwidth (e.g. 8us each), that is ~410us/step saved -> TPOT ~2.7.
+- Profile evidence: debug/kernel_dump.py (bs=1 decode): std::enable_if (gemvx) 56 calls/862us. debug/gemv_triton.py.
+- Related earlier entries: [39] (gemvx investigation - M=2 padding failed: o slower, down not bit-identical), [37] (plateau - decode GPU bit-identity-bound).
+- Change: NONE. Investigation only (debug/gemv_triton.py, debug/gemv_tune.py).
+- Correctness: NOT REACHED (no keeper).
+- Findings: (1) F.linear (gemvx) == torch.mm bit-equal; (2) a Triton GEMV with per-64-chunk tree-sum + sequential chunk accumulation is bit-identical (maxd=0) for EVERY BLOCK_N in 1..64 and BLOCK_K in 32..256 - so cuBLAS's 2048-dot-product order is reproducible and even has slack (multiple trees give the same bf16 result); (3) BUT no Triton config beats F.linear: best 29.8us (BLOCK_N=8, BLOCK_K=64) vs 15.8us F.linear. More programs (BLOCK_N=1..16) hit poor coalescing (matrix-vector rows stride K apart); larger BLOCK_N underutilizes (16-32 CTAs < 108 SMs). cuBLAS's gemvx at 235GB/s is near-optimal for a GEMV.
+- Outcome: REVERTED (no win)
+- Why it failed: Triton GEMV is inherently memory-pattern-poor for row-major matrix-vector products; cuBLAS's gemvx is already at ~235GB/s (3.5x floor is inherent to the GEMV access pattern, not a cuBLAS deficiency). No bit-identity-safe faster GEMV exists on this GPU.
+- Worth retrying? NO. The gemvx cost is inherent; the only escape would be restructuring the model math (e.g. keeping o/down in a larger batched GEMM), which is not bit-identity-safe.
 
 ## Backlog
 
