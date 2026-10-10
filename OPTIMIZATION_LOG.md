@@ -23,6 +23,7 @@
 | 15 | single-tensor prepare_decode (one H2D in graph mode) | 459.51 | 8.93 | 3.52 | 1.004x |
 | 16 | drop redundant graph-vars fills (exact-bs graphs) | 460.10 | 9.39 | 3.51 | 1.005x |
 | 17 | fuse paged-KV store into scale+rotary kernel (drop store_kvcache) | 459.94 | 8.58 | 3.47 | 1.005x |
+| 18 | fuse bs=1 qk-norm+rotary+KV-store (8->4 kernels/layer at bs=1) | 459.73 | 8.30 | 3.465 | 1.004x |
 
 ## Experiments tried
 
@@ -48,6 +49,7 @@
 | 24 | single-tensor prepare_decode (one H2D in graph mode) | sync | KEPT | ~0 (TPOT -1.3%) | prepare built 4 GPU tensors (input_ids/positions/context_lens/slot_mapping) = 4 H2D dispatches (~100us). Graph mode now builds one (bs,4) int32 tensor + strided column views (the graph-vars copies handle strides and int32->long casts); eager mode keeps the contiguous path. prepare 0.12->0.08ms. TPOT 3.57->3.52, TTFT 9.4->8.9 |
 | 25 | drop redundant graph-vars fills (exact-bs graphs never read padding) | sync | KEPT | ~0 (TPOT -0.3%) | graph_bs=[1,2,3,4,5] gives an exact graph for every bs, so the graphs never read beyond row bs; the 3 fills (slot_mapping/context_lens/block_tables) only reset rows the graphs never touch. Removed them (kept only when use_bs != bs, i.e. larger-graph padding). replay-launch 0.11->0.08ms, step 3.46->3.41. TPOT 3.525->3.515, throughput 460.1 |
 | 26 | fuse paged-KV store into scale+rotary kernel (drop store_kvcache) | kernel | KEPT | ~0 (TPOT -1.4%) | the decode q/k chain was prepare + scale_rotate + store_kvcache (28 kernels). scale_rotate now also writes the rotated k and v into the paged KV cache at the token slot for k-heads (same values/slot/offsets as store_kvcache) -> store_kvcache dropped from decode (kept for prefill and the bs=1 separate path via a context.kv_stored flag). Unit test: full attention chain bit-identical at seqlen 50/120/256. decode_time 3089->3039us. TPOT 3.515->3.465, throughput 460.3 |
+| 27 | fuse bs=1 qk-norm+rotary+KV-store (prepare_bs1 + scale_rotate with separate var tensors) | kernel | KEPT | ~0 (bs=1 replay -5.2%, exec -0.12ms) | the bs=1 decode path still used the OLD 8-kernel/layer layout (q _rms_one 3 + k _rms_one 3 + rotary 1 + store_kvcache 1). The fused bs>=2 path (qk_convert + mean + scale_rotate) needs the merged q+k mean, which at bs=1 changes the k-reduce config -> bit-identity fails. Key insight: the CONVERT is elementwise per-row (merge-safe), only the MEANS must stay separate torch calls. prepare_bs1 does one qk_convert + separate q/k means; scale_rotate now takes var_q/var_k pointers (bs>=2 passes slices of the merged var as views). 8->4 kernels/layer, 571->459 kernels/step at bs=1. Benchmark TPOT neutral (at ceiling, within noise); bs=1 replay 2973->2818us, exec (benchmark env) 3.46->3.34ms |
 
 ## Details
 
@@ -282,8 +284,7 @@
 - Why it worked: the fills were a leftover from when graphs padded up to a larger shape; with exact per-bs graphs the padding rows are never read, so the fills were pure overhead.
 - Worth retrying? NO (done).
 
-## [26] 2026-10-10 10:10  Fuse paged-KV store into scale+rotary kernel (KEPT)
-- Hypothesis and expected gain: decode attention chain was qk prepare + scale_rotate (rotated q/k) + store_kvcache (28 kernels) + flash. The flash reads the paged cache, and the rotated k's only consumer is store_kvcache, so the scale_rotate kernel (which already computes the rotated k and has v available) can write both into the cache -> drop store_kvcache from decode, 28 fewer kernels/step.
+## [26] 2026-10-10 10:10  Fuse paged-KV store into scale+rotary kernel (KEPT)- Hypothesis and expected gain: decode attention chain was qk prepare + scale_rotate (rotated q/k) + store_kvcache (28 kernels) + flash. The flash reads the paged cache, and the rotated k's only consumer is store_kvcache, so the scale_rotate kernel (which already computes the rotated k and has v available) can write both into the cache -> drop store_kvcache from decode, 28 fewer kernels/step.
 - Profile evidence: kernel categories store_kvcache 28 kernels/85us. decode_time 3089us (exp 25 baseline) -> 3039us = -50us/step.
 - Related earlier entries: [23] (scale+rotary fuse), [16] (flash in-kernel store FAILED because flash reads the fresh token from registers - here we keep the separate cache write with identical values, so numerics are unchanged).
 - Change: layers/rotary_embedding.py - scale_rotate_kernel writes rotated k + v to the paged cache for k-heads (slot*num_kv_heads*head_dim + hh*head_dim); RotaryEmbedding.scale_rotate takes v/k_cache/v_cache/slot_mapping/num_kv_heads/v_stride. layers/attention.py - decode skips store_kvcache when context.kv_stored (bs>=2 fused path); prefill and bs=1 still store. utils/context.py - kv_stored flag. src/qwen3.py - sets kv_stored and passes the cache/v to scale_rotate. commit e8e0246.
@@ -294,6 +295,20 @@
 - Outcome: KEPT
 - Why it worked: unlike exp 16 (flash in-kernel store, which changed numerics by reading the fresh token from registers), this keeps the K/V values written to the cache byte-identical to store_kvcache (same values, same slot, same per-head offsets), so the flash reads an identical cache. The store is just relocated into an existing kernel that already has the rotated k in registers.
 - Worth retrying? NO (done).
+
+## [27] 2026-10-10 11:20  Fuse bs=1 qk-norm+rotary+KV-store path (KEPT)
+- Hypothesis and expected gain: the benchmark's decode is ~46% bs=1 (max_tokens=256), and the bs=1 qk path still used the OLD 8-kernel/layer layout (q _rms_one 3 + k _rms_one 3 + rotary_emb_merged 1 + store_kvcache 1) = 224 kernels/step, while the bs>=2 fused path (qk_convert + mean + scale_rotate) is 4/layer = 112. Fusing the bs=1 path -> ~112 fewer kernels/step -> ~300-450us/step saved at bs=1.
+- Profile evidence: kernelcount.py at bs=1 decode replay: 571 launches total; convert_add 113 (=57 hidden + 56 qk), mean 113, rms_scale 113, rotary 28, store_kv 28. bs distribution (stepprof_real, max_tokens=256): {1:46%, 2:33%, 3:18%, 4:3%}. Prior exp 15 documented that merging the q+k mean at bs=1 breaks bit-identity (k-reduce config differs for (8,128) vs (24,128)).
+- Related earlier entries: [15] (QKNorm merge - the bs=1 fallback), [23] (scale+rotary fuse), [26] (KV store fuse).
+- Key insight: the CONVERT is elementwise per-row, so merging q+k into one qk_convert kernel is bit-identical; only the MEANS must remain separate torch calls (x2[:nq].mean / x2[nq:].mean over the same row counts as the old standalone q/k norms -> same reduce config). scale_rotate gained var_q/var_k pointers (bs>=2 passes slices of the merged var as views; bs=1 passes the two separately-reduced vars). 8->4 kernels/layer.
+- Change: layers/layernorm.py (QKNorm.prepare_bs1), layers/rotary_embedding.py (scale_rotate_kernel var_q/var_k), src/qwen3.py (bs=1 uses prepare_bs1 + scale_rotate, kv_stored=True). commit b19c29c.
+- Correctness: PASS - bs=1 graph 0/37 vs pre-change ref (/tmp/out_kvstore_bs1.json); bs=1 eager 0/37 vs pre-change ref; bs=1 eager vs graph 0/37; batched graph run1 vs run2 0/37.
+- Benchmark before (exp 26): 459.58-460.30 tok/s, TTFT 8.02-9.14, TPOT 3.46-3.47, ITL 3.46-3.47
+- Benchmark after (2 runs): 459.58 then 459.88 tok/s, TTFT 8.29/8.31 (p99 148/140), TPOT 3.46/3.47 (p99 3.71/3.70), ITL 3.46/3.47
+- Gap to vLLM now: throughput 1.004x, TPOT 1.09x, TTFT 0.47x
+- Outcome: KEPT (benchmark TPOT neutral at the throughput ceiling, within noise; the underlying improvement is real: bs=1 replay 2973->2818us via replay_vs_wall, step exec in benchmark env 3.46->3.34ms via TOKN_RT_TIMING)
+- Why it worked: bs=1 decode is per-kernel-cost bound (571 kernels/step); removing 112 kernels (20%) from the bs=1 step shortens the graph replay by ~155us. The benchmark headline TPOT does not move because (a) bs=1 is only ~46% of decode steps, (b) the remaining steps are already fused, and (c) throughput is at the 460.7 ceiling so the metric is noise-limited. The fusion also simplifies the code (drops the special-case bs=1 fallback through QKNorm.forward).
+- Worth retrying? NO (done). Follow-up: the bs=1 hidden-RMSNorm means (57 torch reduce kernels, ~330us total) remain the next kernel-count target, blocked by the reduction-order gate.
 
 ## Backlog
 
