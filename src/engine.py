@@ -289,9 +289,9 @@ class Engine:
                 logits = self.RUN.run_model(input_ids, positions, False)
             finally:
                 reset_context()
-            # Enqueue the argmax reduction now (reads the graph's output buffer
-            # on the same stream); only the completion wait is deferred.
-            tokens_t = torch.argmax(logits, dim=-1)
+            # The decode graph's LAST op is the greedy argmax writing the next
+            # token ids into tbuf_tok (exp 47), so there is no per-step
+            # torch.argmax dispatch here. Only the completion wait is deferred.
             ev = torch.cuda.Event()
             ev.record()
 
@@ -323,7 +323,10 @@ class Engine:
             await asyncio.sleep(0)
 
         with torch.inference_mode():
-            next_token_ids = tokens_t.tolist()
+            # The tokens were written into tbuf_tok by the graph's in-graph
+            # argmax (exp 47); read them back after the wait (pure D2H, no sync
+            # - the GPU has finished). tbuf_tok is int32; token ids fit.
+            next_token_ids = self.RUN.graph_vars["tbuf_tok"][:len(seqs)].tolist()
             finished = self.scheduler.postprocess(seqs, next_token_ids, False)
 
         for seq in seqs:

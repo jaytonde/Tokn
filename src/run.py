@@ -330,6 +330,14 @@ class Run:
                 # run_model replays ONE graph instead of copy-graph + model
                 # graph (the copy ops are just 5 tiny kernels at the front of
                 # the graph, ~3us, and avoid a second ~10-15us graph launch).
+                # The LAST op (exp 47) is the greedy argmax writing the next
+                # step's token ids DIRECTLY into tbuf_tok. The argmax kernel
+                # was already on the GPU critical path (enqueued after the
+                # replay every step), so moving it in-graph costs no GPU time
+                # but removes the per-step torch.argmax dispatch (~20us CPU)
+                # and the per-step token H2D in prepare_decode (~22us CPU):
+                # the CPU never has to write tbuf_tok back (it reads the
+                # tokens from tbuf_tok after the wait for postprocess).
                 outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
                 with torch.cuda.graph(graph, self.graph_pool):
                     g_input[:bs] = tbuf_tok[:bs]
@@ -338,6 +346,7 @@ class Run:
                     g_slot[:bs] = tbuf_state[:bs, 2]
                     block_tables[:bs] = tbuf_state[:bs, 3:3 + max_num_blocks]
                     outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
+                    tbuf_tok[:bs] = torch.argmax(outputs[:bs], dim=-1)
 
                 if self.graph_pool is None:
                     self.graph_pool = graph.pool()
@@ -619,21 +628,16 @@ class Run:
     def prepare_decode(self, seqs, token_only=False, spec_next=False):
         # token_only: the state columns (pos/ctx/slot/block-table) were already
         # written into tbuf_state by the previous step's speculative prep
-        # (exp 41); only the token buffer needs the current last_token (a
-        # CONTIGUOUS write - ~22us vs ~41us for a strided column write).
+        # (exp 41), and the token buffer tbuf_tok was already written by the
+        # previous decode graph's in-graph argmax (exp 47) - so NOTHING needs
+        # to be written here, just return the buffer views for run_model.
         # spec_next: build the NEXT step's state columns (pos=len, ctx=len+1,
         # slot@pos=len) into tbuf_state - they depend only on the running set
         # and current token counts, not on this step's tokens, so they can be
         # pre-computed during the previous step's GPU wait (async pinned H2D).
         if token_only:
-            # The state columns AND the inference context were already set by
-            # the previous step's speculative prep (spec_next, exp 41); only
-            # the token buffer needs the current last_token (contiguous write).
             n = len(seqs)
             gv = self.graph_vars
-            gv["tbuf_tok"][:n].copy_(
-                torch.tensor([s.last_token for s in seqs], dtype=torch.int32)
-            )
             return gv["tbuf_tok"][:n], gv["tbuf_state"][:n, 0]
 
         if spec_next:
