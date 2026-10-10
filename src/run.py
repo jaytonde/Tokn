@@ -106,6 +106,7 @@ class Run:
         self.prefill_graph_pool = None
         self.prefill_graph_cap = 256
         self.prefill_capture_max = 128
+        self.capture_stats = {"n": 0, "wall": 0.0, "shapes": {}}
 
         print(f"Loading model onto device : {self.device}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model)
@@ -359,7 +360,19 @@ class Run:
         if gv is None:
             if len(self.prefill_graphs) >= self.prefill_graph_cap:
                 return self.custom_model(input_ids, positions)  # eager fallback
-            gv = self._capture_prefill_graph(key, input_ids, positions, context)
+            # Eager fallback on cache miss instead of a synchronous lazy
+            # capture: capturing a multi-seq graph stalls the whole pipeline
+            # ~190ms (CUDA graph capture serializes), and the captured shape
+            # rarely repeats, so the stall buys nothing. Eager prefill is
+            # bit-identical (same kernels/shapes, just host-dispatched) and
+            # costs ~40ms. The pre-captured (1, S<=128) grid still covers the
+            # common single-seq shapes.
+            t0 = time.perf_counter()
+            out = self.custom_model(input_ids, positions)
+            self.capture_stats["n"] += 1
+            self.capture_stats["wall"] += time.perf_counter() - t0
+            self.capture_stats["shapes"][key] = self.capture_stats["shapes"].get(key, 0) + 1
+            return out
 
         gv["input_ids"][:num_tokens] = input_ids
         gv["positions"][:num_tokens] = positions

@@ -163,9 +163,19 @@ class Engine:
                 # Without this, the ~5.5ms synchronous step starves the
                 # submission coroutine and arrivals drift late by several
                 # seconds over a 400-request run, inflating end-to-end latency.
-                finished = await asyncio.get_running_loop().run_in_executor(
-                    None, self.step
-                )
+                mode = os.environ.get("TOKN_STEP_MODE", "executor")
+                if mode == "split":
+                    # Decode steps enqueue on the event loop (keeps arrivals
+                    # on time) with only the GPU wait off-loaded; prefill
+                    # steps run entirely in the executor (their lazy CUDA-graph
+                    # capture must not block the loop). See _step_split.
+                    finished = await self._step_split()
+                elif mode == "inline":
+                    finished = self.step()
+                else:
+                    finished = await asyncio.get_running_loop().run_in_executor(
+                        None, self.step
+                    )
 
                 for seq in finished:
                     output_ids = seq.token_ids[seq.num_prompt_tokens:]
@@ -200,6 +210,12 @@ class Engine:
         if not seqs:
             return []
 
+        return self._step_with_seqs(seqs, is_prefill)
+
+    @torch.inference_mode
+    def _step_with_seqs(self, seqs, is_prefill):
+        """Full synchronous step given already-scheduled seqs: prepare, GPU
+        forward, argmax, postprocess, block hashing/deallocation."""
         next_token_ids = self.RUN.call("run", seqs, is_prefill)
         
         finished = self.scheduler.postprocess(
@@ -207,6 +223,70 @@ class Engine:
             token_ids=next_token_ids,
             is_prefill=is_prefill,
         )
+
+        for seq in seqs:
+            start_block = seq.num_hashed_blocks
+            end_block = seq.num_cached_tokens // self.block_size
+
+            if end_block > start_block:
+                self.block_manager.hash_completed_blocks(
+                    token_ids=seq.token_ids,
+                    block_table=seq.block_table_ids,
+                    start_block=start_block,
+                    end_block=end_block
+                )
+                seq.num_hashed_blocks = end_block
+
+        for seq in finished:
+            self.block_manager.deallocate(seq.block_table_ids)
+            self.RUN._padded_bt.pop(seq.seq_id, None)
+
+        return finished
+
+    async def _step_split(self):
+        """Non-blocking step: enqueue decode GPU work on the event loop, then
+        await GPU completion without blocking the loop.
+
+        The full run_in_executor step keeps arrivals on time but costs
+        ~0.2ms/step of executor dispatch + GIL handoff (TPOT 3.46 vs 3.25 for
+        inline). Here the decode enqueue phase (schedule/prepare/replay/argmax)
+        runs directly on the event loop (~0.15ms, fine since arrivals are 2/s)
+        and ONLY the GPU wait is delegated to the executor as a bare
+        `event.synchronize()` (a C call, no GIL churn). PREFILL steps run the
+        whole step in the executor: run_prefill can lazily CAPTURE a multi-seq
+        CUDA graph (~190ms) on first use, which must not block the event loop
+        (on-loop capture regressed TTFT p99 140->217ms in exp 28)."""
+        loop = asyncio.get_running_loop()
+        seqs, is_prefill = self.scheduler.schedule()
+
+        if not seqs:
+            return []
+
+        if is_prefill:
+            # Prefills may trigger lazy graph capture (~190ms); keep them off
+            # the event loop. Prefills are rare (~1 per request vs ~256 decode
+            # steps), so the full-step executor tax is negligible here.
+            return await loop.run_in_executor(None, self._step_with_seqs, seqs, True)
+
+        with torch.inference_mode():
+            input_ids, positions = self.RUN.prepare_decode(seqs)
+            try:
+                logits = self.RUN.run_model(input_ids, positions, False)
+            finally:
+                reset_context()
+            # Enqueue the argmax reduction now (reads the graph's output buffer
+            # on the same stream); only the completion wait is deferred.
+            tokens_t = torch.argmax(logits, dim=-1)
+            ev = torch.cuda.Event()
+            ev.record()
+
+        # Wait for the GPU without blocking the event loop. The executor task
+        # is a single C call (no Python), so there is no GIL contention.
+        await loop.run_in_executor(None, ev.synchronize)
+
+        with torch.inference_mode():
+            next_token_ids = tokens_t.tolist()
+            finished = self.scheduler.postprocess(seqs, next_token_ids, False)
 
         for seq in seqs:
             start_block = seq.num_hashed_blocks
