@@ -298,11 +298,12 @@
 ## Backlog
 
 - Fused MLP (gate_up + silu + down in one kernel) and fused QKV GEMM: would cut ~1ms/step of the decode GEMM time. BLOCKED by the bs-1 bit-identity gate (Triton GEMM accumulation differs from cuBLAS -> flips near-tie tokens). Could be retried IF the gate is satisfied via matching reduction, or with torch.compile fusions that preserve tokens.
-- Full RMSNorm var fusion (fold pow+mean into Triton): ~0.5ms/step. BLOCKED: Triton sum reduction differs from torch's mean_kernel; no reshape/num_warps combination matched (debug/redmatch.py). Retry only with exact reduction matching.
-- Reduce run_loop per-step event-loop overhead (~8.5us/step, ~0.28s over 400-request run) to shrink residual arrival delay. Small.
-- Reduce TTFT tail (p99 ~600ms, 3.4x vLLM): admit prefills faster during bursts or interleave prefill+decode (mixed batching). Larger change.
-- Flash attention splitkv path: DONE in [14] (single-pass for seqlen<=256 via dual-graph hybrid, TPOT -4.2%, TTFT -19%). Remaining: >256 contexts still use splitkv; could extend the fast path to >256 by re-capturing with a higher threshold IF the gate allowed it (it doesn't, without changing the reference).
-- The benchmark is arrival-bound; throughput is near the ceiling (~461 tok/s theoretical). Further decode gains mostly improve TPOT/ITL and the tail, not the headline throughput.
+- Full RMSNorm var fusion (fold pow+mean into Triton): the mean now costs ~332us/step (85 reduce kernels, 57 hidden + 28 qk), measured by bypassing the mean in a debug test. BLOCKED: Triton sum reduction differs from torch's mean_kernel; no reshape/num_warps combination matched (debug/redmatch.py). Retry only with exact reduction matching.
+- lm_head GEMM: ~376us/step (biggest single kernel, 12% of decode), memory-bound on the 311MB tied embedding weight (floor ~222us at 1.4TB/s). cuBLAS is at 1.7x the floor. Any GEMM change risks the bs=1 gate (accumulation order). Could try a torch.compile/inductor GEMM and test whether bs=1 tokens survive.
+- CPU per-step overhead: now ~0.18ms exposed (prepare 0.08 + replay-launch 0.08 + post/schedule 0.02), down from ~0.44ms at session start. TPOT 3.47 = replay (~3.04) + exposed CPU. Remaining: the 4 graph-vars copies (input_ids/positions/slot_mapping/context_lens) + block_tables copy + graph.replay() dispatch. Could merge copies into a single (bs,4)->(max,4) buffer copy IF the model kernels read strided columns (invasive).
+- Reduce TTFT tail (p99 ~150-200ms): admit prefills faster during bursts or interleave prefill+decode (mixed batching). TTFT mean is 0.48x vLLM already; the p99 is queueing when 5 slots are full.
+- Flash attention splitkv path: DONE in [14] for seqlen<=256. >256 contexts still use splitkv (reference path, required by the gate for the 474-token prefix prompts).
+- The benchmark is arrival-bound; throughput ~460 tok/s is ~99.9% of the ceiling (last arrival 210.4s + 0.9s drain). Further decode gains mostly improve TPOT/ITL, not the headline throughput.
 
 ## [loop] 2026-10-09 13:07  Session 1 ended without a status line
 - Outcome: SESSION CRASHED or cut off. Transcript: debug/opencode_runs/iter_001_20261009_124714.log
