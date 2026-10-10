@@ -19,6 +19,7 @@
 | 11 | fuse rotary cos/sin cache lookup into RoPE kernel | 459.58 | 11.15 | 3.78 | 1.003x |
 | 12 | QKNorm reads strided q/k from qkv output (drop 56 copy kernels) | 459.07 | 9.27 | 3.64 | 1.003x |
 | 13 | merge q+k rotary into one kernel launch | 460.10 | 8.77 | 3.62 | 1.005x |
+| 14 | fuse qk-norm scale into rotary kernel (scale+rotate) | 460.13 | 9.39 | 3.57 | 1.005x |
 
 ## Experiments tried
 
@@ -40,6 +41,7 @@
 | 20 | QKNorm reads strided q/k from qkv output directly (no reshape copy) | kernel | KEPT | ~0 (TPOT -4%, TTFT -16%) | the decode graph had 59 direct_copy elementwise kernels/step (~250us profiler). Root cause: q/k are strided views of the qkv GEMM output (dim-0 stride 4096), so QKNorm's q.reshape(-1,hd) forced a copy per q and k (2/layer = 56). Rewrote qk_convert_kernel to compute strided offsets (b*stride + h*cols) -> no copy, bit-identical. Copy kernels 59->3, decode_time 3330->3184us. TPOT 3.78->3.64, TTFT 11.2->9.3 |
 | 21 | merge q+k rotary into one kernel launch | kernel | KEPT | ~0 (TPOT -0.8%, TTFT -11%) | rotary was 2 kernels/layer (q and k separately) = 56/step; merged into one launch mapping head -> q or k tensor (same cos/sin lookup, same math) -> 28 kernels/step. Bit-identical. decode_time 3184->3146us. TPOT 3.64->3.62, TTFT 9.3->8.8. Throughput 460.1 (1.005x vLLM) |
 | 22 | skip graph-vars fills when batch is full (bs==max_num_seqs) | sync | REVERTED (no gain) | ~0 | bs=5 steps are rare in the benchmark (steady state ~2 concurrent per Little's law), so skipping the 3 fills on full batches is neutral. Two runs TPOT 3.64/3.59 (avg 3.615) vs baseline 3.61/3.62. No gain, reverted for simplicity. |
+| 23 | fuse qk-norm scale into rotary kernel (scale+rotate in one launch) | kernel | KEPT | ~0 (TPOT -1.4%, TTFT +) | QKNorm (bs>=2) now emits fp32 xf/var via prepare(); a new scale_rotate_kernel does the RMSNorm scale AND RoPE in one launch (was qk_scale 28 kernels + rotary 28 = 56 -> 28). Bit-identical (bf16 roundings match qk_scale exactly). decode_time 3136->3089us. TPOT 3.62->3.57, throughput 460.5 (1.006x vLLM) |
 
 ## Details
 
@@ -233,6 +235,19 @@
 - Gap to vLLM now: throughput 1.005x, TPOT 1.14x, TTFT 0.49x
 - Outcome: KEPT
 - Why it worked: q and k rotary share the same positions -> identical cos/sin lookup; computing both in one launch removes a duplicate lookup+launch with no numeric change.
+- Worth retrying? NO (done).
+
+## [23] 2026-10-10 09:30  Fuse qk-norm scale into rotary kernel (KEPT)
+- Hypothesis and expected gain: the q/k chain was qk_convert (28) + qk_mean (28) + qk_scale (28) + rotary (28) = 112 kernels/step. The scale output feeds directly into rotary (same data), so fusing them -> 28 fewer kernels -> ~80us/step.
+- Profile evidence: kernel categories qk_norm 56 kernels/174us + rotary 28/169us. decode_time 3136us (exp 22 baseline) -> 3089us = -47us/step.
+- Related earlier entries: [15] (QKNorm), [20] (strided read), [21] (merged rotary), [18].
+- Change: layers/layernorm.py - QKNorm.prepare() returns fp32 xf/var (convert+mean only, no scale/y). layers/rotary_embedding.py - scale_rotate_kernel does RMSNorm scale (round_bf16(x*inv)*w, matching qk_scale exactly) then RoPE in one launch; RotaryEmbedding.scale_rotate(). src/qwen3.py - Qwen3Attention.forward uses prepare+scale_rotate for bs>=2, keeps separate norm+rotary for bs=1. commit 015996f.
+- Correctness: PASS - fused vs (scale then rotary) bit-identical at bs=2,5 with random weights; bs=1 gate 0/37 (uses separate path); batched run1 vs run2 0/37. First version had a k-output offset bug (wrote out of bounds using xf row index for the outk tensor) - caught by the unit test, fixed with a separate out_base.
+- Benchmark before (exp 21): 459.94/460.26 tok/s, TTFT 7.95/9.59, TPOT 3.61/3.62, ITL 3.61/3.62
+- Benchmark after (2 runs): 460.48/459.78 tok/s, TTFT 8.73/10.04 (p99 169/196), TPOT 3.55/3.59 (p99 3.75/3.80), ITL 3.55/3.59
+- Gap to vLLM now: throughput 1.006x, TPOT 1.12x (was 1.14x), TTFT 0.53x
+- Outcome: KEPT
+- Why it worked: scale and rotary are sequential on the same values with no other consumer between them; doing both in one kernel removes a launch and a memory round-trip (scaled q/k no longer written to global then re-read). The bf16 rounding must happen at the same points as the old two kernels (round after scale, fp32 rotary math, round at store).
 - Worth retrying? NO (done).
 
 ## Backlog
