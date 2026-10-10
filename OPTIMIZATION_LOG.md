@@ -341,3 +341,7 @@
 ## [loop] 2026-10-10 04:57  Session 3 ended without a status line
 - Outcome: SESSION CRASHED or cut off. Transcript: debug/opencode_runs/iter_003_20261010_025213.log
 - Any experiment in progress was not finished. Check the transcript before retrying it.
+
+## [loop] 2026-10-10 11:41  Session 6 ended without a status line
+- Outcome: SESSION CRASHED or cut off. Transcript: debug/opencode_runs/iter_006_20261010_101621.log
+- Any experiment in progress was not finished. Check the transcript before retrying it.
