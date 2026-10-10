@@ -31,7 +31,8 @@
 | 38 | busy-poll CUDA event in split-step (drop run_in_executor wait) | 459.5 | 6.95 | 3.21 | 1.004x |
 | 41 | speculative decode prep (hide state build under GPU wait) | 459.2 | 6.97 | 3.19 | 1.003x |
 | 43 | skip redundant prefill store_kvcache (scale+rotate already stores) | 459.2 | 6.54 | 3.19 | 1.003x |
-| 47 | in-graph greedy argmax writes tbuf_tok (drop per-step argmax dispatch + token H2D) | 459.6 | 6.78 | 3.15 | 1.004x |
+| - | vLLM 0.31.0 (this machine, 2026-10-10, full latency comparison) | 458.20 | 17.46 (p50 16.44, p99 78.3) | 3.18 | 1.00x |
+| 47 | in-graph greedy argmax writes tbuf_tok (drop per-step argmax dispatch + token H2D) | 459.6 | 6.78 (p50 5.03, p99 72.3) | 3.15 | 1.004x  TPOT MILESTONE (3.15 < vLLM 3.18) |
 
 ## Experiments tried
 
@@ -587,10 +588,6 @@
 - Why it failed: the ns=1 vs ns=0 flash kernels are numerically DIFFERENT (different softmax/reduction schedules); whether they agree for a given (cache, query) depends on the data's rounding. Real structured KV at <=256 happens to agree (exp 14); random KV does not. Extending the threshold risks silent token flips in the benchmark's 257-369 range.
 - Worth retrying? NO. The splitkv penalty at ctx>256 is fundamental; the ITL p99 gap is blocked by the flash numerics.
 
-## [50] 2026-10-10 19:45  Submission-path tokenization cost on the event loop (INVESTIGATION)
-- Context: add_async_request runs apply_chat_template + tokenizer synchronously on the asyncio event loop (submission coroutine), which could block the run_loop's postprocess and inflate TPOT/ITL for the affected steps. Measuring the actual cost to decide if it's a lever.
-- Outcome: see Details entry - measured, decided.
-
 ## [50] 2026-10-10 19:45  Submission-path tokenization cost (INVESTIGATION - not a lever)
 - Context: add_async_request runs apply_chat_template + tokenizer synchronously on the asyncio event loop, which could block the run_loop's step postprocess and inflate TPOT/ITL for affected steps.
 - Profile evidence: debug/tokenizer_cost.py (real 400 questions): template 114.7us mean, tokenizer 175.9us mean, tolist 7.7us -> TOTAL 298.3us mean (p50 203.7us, p99 547.4us) per request. Over 400 requests = 0.12s of event-loop blocking out of 210s.
@@ -620,15 +617,16 @@
 
 ## Backlog
 
-- The benchmark is arrival-bound; throughput ~460 tok/s is ~99.9% of the ceiling (last arrival 210.4s + 0.6s drain). Further decode gains mostly improve TPOT/ITL, not the headline throughput.
-- TPOT 3.19 vs vLLM 3.18 (after exp 43): the gap is ~0.01ms = run-to-run noise. The decode GPU replay is bit-identity-bound [37]; the exposed CPU is below the ~40us noise [40]. Session-10 confirmed the remaining structural ideas are dead ends:
-  - Overlap prefill with decode on a side stream [42, REVERTED]: the prefill and decode are BOTH memory-bound on the SAME 882MB weights, so concurrency just slows each down (waiting request's prefill went 3.3->5-6ms, TTFT mean +61%). The decode stall removal only helps the unreported p999 (debug/itl_audit.py: prefill stalls are 0.45% of ITLs, above p99).
-  - Prefill GEMM speedup (TTFT is prefill-dominated, p50 ~5ms): the prefill GEMMs are ~5x below the 834GB/s floor (A30 bf16 peak measured ~80 TFLOPS; small-M cuBLAS inefficiency). Any replacement (Triton/CUTLASS GEMM, M-padding, config change) breaks bit-identity -> fails the bs=1 gate. Blocked.
-  - TTFT p99 (~80-100ms) is burst queueing (Poisson bursts up to 15 arrivals in 3s vs 5 slots, seed 0) and is ADMISSION-bound: exp 43 made prefills ~100us faster and the p99 did not move (43.8/81.5 vs 79.9). Fixing it needs admitting the 6th+ request's prefill during a burst, which trades TTFT for TPOT (the wait must land somewhere; the keep rule rejects the TPOT p99 regression).
-- Keep looking for: redundant ops in the prefill path (exp 43 found and removed one: the unconditional store_kvcache). The prefill still runs 85 mean + 57 convert_add + 57 rms_scale + 28 qk_convert + 28 scale_rotate + 28 flash + 28 silu kernels - all necessary or bit-identity-blocked.
-- Full RMSNorm var fusion (fold pow+mean into Triton): BLOCKED - no Triton config matches torch's mean_kernel for the norm shapes; retry only with exact reduction matching.
-- Background multi-seq prefill capture: on a cache-miss prefill, run EAGER and capture the graph on a side stream/thread concurrently so repeated shapes replay at ~8ms. Not needed for the benchmark (its 3 multi-seq shapes never repeat).
-- GPU-resident token passing: the scheduler still needs tokens on CPU for postprocess/hashing/finish detection, so the D2H can't be eliminated; benefit would be hiding the D2H behind the GPU (exp 34/35 found neutral).
+- The benchmark is arrival-bound; throughput ~460 tok/s is ~99.9% of the ceiling (last arrival 210.4s + ~0.4s drain). Further decode gains mostly improve TPOT/ITL, not the headline throughput. vLLM's throughput 458.2 is ~equal elapsed (210.78s) with FEWER output tokens (96581 vs our ~96900) - so the throughput margin over vLLM is largely a near-tie token-count artifact; the REAL wins over vLLM are latency (TPOT 3.15 vs 3.18, TTFT 6.78 vs 17.46).
+- Session-11 state (after exp 47): TPOT 3.15 (BEATS vLLM 3.18 for the first time), TTFT mean 6.78 / p50 5.03 / p99 72 (all beat vLLM 17.46/16.44/78.3), ITL mean 3.16 / p50 3.08 (beat), ITL p99 3.48 vs vLLM 3.39 (the ONLY metric still behind, by 0.09ms).
+- The ITL p99 gap (3.48 vs 3.39) is the slowest decode steps (high bs + ctx>256 splitkv flash). Investigated this session and BLOCKED from every angle:
+  - single-pass for ctx>256 (exp 32/49): flash ns=1 vs ns=0 divergence is DATA-DEPENDENT (random KV diverges even at 250; real structured KV matches at <=256 but the benchmark's 257-369 range is not gate-covered) - unsafe.
+  - forced explicit per-bs num_splits (exp 52): bit-identical options exist (bs1/2/3->ns8, bs4/5->ns3) but are all splitkv kernels ~2us of each other; only non-identical single-pass recovers the ~13us/call penalty. Sub-noise, fragile. Abandoned.
+  - Reducing high-bs steps via capping concurrency: trades ITL p99 for TTFT p99 (fewer slots -> more burst queueing) - rejected.
+- Session-11 dead ends (documented): merged qk mean at bs=1 flips a token (exp 44, near-tie density forces bit-identity); prefill GEMM M-padding/batching is slower AND non-identical (exp 45); Triton GEMV is 2x slower than cuBLAS gemvx (exp 48); tokenization on the submission path is negligible (exp 50); event reuse is neutral (exp 51).
+- Session-10's structural dead ends still hold: side-stream prefill overlap (exp 42), prefill GEMM replacement, TTFT p99 admission-bound (no free lunch).
+- The decode GPU replay (bs=1: 459 kernels/3724us) is bit-identity-bound [37]: GEMMs 2406us (lm_head at the 834GB/s floor, qkv/gate_up small-M cuBLAS at 20-50% efficiency, o/down gemvx at 235GB/s with no faster bit-identical GEMV [48]), means 474us (reduction-order gate), flash 273us (library kernel, data-dependent bit-identity), RMSNorm-family 490us (convert/scale fused, means blocked).
+- Remaining untried ideas (low expected value or blocked): GPU-resident token passing (exp 34/35 neutral; the CPU needs tokens for postprocess anyway); background multi-seq prefill capture (benchmark shapes don't repeat); RMSNorm var fusion with exact reduction matching (no Triton config matches torch's mean_kernel); a Triton/CUTLASS GEMM reproducing cuBLAS's exact per-row accumulation for the small-M shapes (redmatch-style, very hard).
 
 ## [loop] 2026-10-09 13:07  Session 1 ended without a status line
 - Outcome: SESSION CRASHED or cut off. Transcript: debug/opencode_runs/iter_001_20261009_124714.log
