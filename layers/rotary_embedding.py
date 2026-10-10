@@ -6,6 +6,62 @@ import triton.language as tl
 
 
 @triton.jit
+def scale_rotate_kernel(
+    xf_ptr,            # fp32 (total_rows, 2*half_dim)
+    var_ptr,           # fp32 (total_rows,)
+    wq_ptr, wk_ptr,    # bf16 (2*half_dim,)
+    cache_ptr,         # cos_sin_cache (max_pos, 1, 2*half_dim)
+    pos_ptr,           # (num_tokens,) long
+    outq_ptr, outk_ptr,  # bf16 outputs
+    num_q_heads,
+    num_k_heads,
+    n_q_rows,          # num_tokens * num_q_heads
+    cache_stride,
+    half_dim: tl.constexpr,
+    eps,
+):
+    """Fused RMSNorm-scale + RoPE for q and k in ONE launch.
+
+    For each (token, head): scale = round_bf16(xf*rsqrt(var+eps)) * w (per
+    head_dim), then rotate with cos/sin from the position cache. Bit-identical
+    to the old (qk_scale_kernel then rotary_emb_merged_kernel): same bf16
+    roundings, same fp32 rotary math."""
+    token = tl.program_id(0)
+    h = tl.program_id(1)
+    lo = tl.arange(0, half_dim)
+    pos = tl.load(pos_ptr + token)
+    cb = pos * cache_stride + lo
+    cos = tl.load(cache_ptr + cb).to(tl.float32)
+    sin = tl.load(cache_ptr + cb + half_dim).to(tl.float32)
+
+    if h < num_q_heads:
+        row = token * num_q_heads + h
+        w_ptr = wq_ptr
+        out_ptr = outq_ptr
+        out_base = row * (2 * half_dim)
+    else:
+        hh = h - num_q_heads
+        row = n_q_rows + token * num_k_heads + hh
+        w_ptr = wk_ptr
+        out_ptr = outk_ptr
+        out_base = (token * num_k_heads + hh) * (2 * half_dim)
+
+    inv = tl.rsqrt(tl.load(var_ptr + row) + eps)
+    x1 = tl.load(xf_ptr + row * (2 * half_dim) + lo)
+    x2 = tl.load(xf_ptr + row * (2 * half_dim) + half_dim + lo)
+    w1 = tl.load(w_ptr + lo)
+    w2 = tl.load(w_ptr + half_dim + lo)
+    # match qk_scale_kernel: round_bf16(x*inv) then * w, stored rounded to bf16
+    s1 = ((x1 * inv).to(tl.bfloat16) * w1).to(tl.bfloat16)
+    s2 = ((x2 * inv).to(tl.bfloat16) * w2).to(tl.bfloat16)
+
+    y1 = s1.to(tl.float32) * cos - s2.to(tl.float32) * sin
+    y2 = s2.to(tl.float32) * cos + s1.to(tl.float32) * sin
+    tl.store(out_ptr + out_base + lo, y1.to(out_ptr.dtype.element_ty))
+    tl.store(out_ptr + out_base + half_dim + lo, y2.to(out_ptr.dtype.element_ty))
+
+
+@triton.jit
 def rotary_emb_merged_kernel(
     q_ptr, k_ptr,
     cache_ptr,      # cos_sin_cache (max_pos, 1, 2*half_dim)
@@ -191,6 +247,32 @@ class RotaryEmbedding(nn.Module):
                 query: torch.Tensor,
                 key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return apply_rotary_emb_merged(query, key, positions, self.cos_sin_cache)
+
+    def scale_rotate(self,
+                     positions: torch.Tensor,
+                     xf: torch.Tensor,
+                     var: torch.Tensor,
+                     w_q: torch.Tensor,
+                     w_k: torch.Tensor,
+                     q_shape,
+                     k_shape,
+                     eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused RMSNorm-scale + RoPE for q and k (from QKNorm.prepare xf/var).
+
+        Bit-identical to qk_scale then rotary, in one kernel launch."""
+        num_tokens = q_shape[0]
+        num_q_heads = q_shape[1]
+        num_k_heads = k_shape[1]
+        half_dim = q_shape[2] // 2
+        n_q_rows = num_tokens * num_q_heads
+        outq = torch.empty(q_shape, dtype=torch.bfloat16, device=xf.device)
+        outk = torch.empty(k_shape, dtype=torch.bfloat16, device=xf.device)
+        scale_rotate_kernel[(num_tokens, num_q_heads + num_k_heads)](
+            xf, var, w_q, w_k, self.cos_sin_cache, positions, outq, outk,
+            num_q_heads, num_k_heads, n_q_rows, self.cos_sin_cache.stride(0),
+            half_dim, eps,
+        )
+        return outq, outk
 
 
 def get_rope(

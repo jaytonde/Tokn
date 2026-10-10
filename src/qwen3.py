@@ -89,8 +89,21 @@ class Qwen3Attention(nn.Module):
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         if not self.qkv_bias:
-            q, k = self.qk_norm(q, k)
-        q, k = self.rotary_emb(positions, q, k)
+            nk = q.shape[0] * k.shape[1]
+            if nk < 16:
+                # bs=1: separate norm path (torch reduce config differs merged)
+                q, k = self.qk_norm(q, k)
+                q, k = self.rotary_emb(positions, q, k)
+            else:
+                # Fused scale+rotary: QKNorm emits fp32 xf/var, the rotary
+                # kernel does the RMSNorm scale and RoPE in one launch.
+                xf, var = self.qk_norm.prepare(q, k)
+                q, k = self.rotary_emb.scale_rotate(
+                    positions, xf, var, self.qk_norm.w_q, self.qk_norm.w_k,
+                    q.shape, k.shape, self.qk_norm.eps,
+                )
+        else:
+            q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v)
         output = self.o_proj(o.flatten(1, -1))
         return output.view(input_shape)

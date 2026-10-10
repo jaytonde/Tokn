@@ -122,6 +122,25 @@ class QKNorm(nn.Module):
         self.w_q = nn.Parameter(torch.ones(head_dim))
         self.w_k = nn.Parameter(torch.ones(head_dim))
 
+    def prepare(self, q: torch.Tensor, k: torch.Tensor):
+        """Return (xf, var) fp32 for q+k rows (convert + mean only).
+
+        Used by the fused scale+rotary kernel (Qwen3Attention bs>=2 path):
+        the scale step moves into the rotary kernel, avoiding a separate
+        qk_scale launch and a memory round-trip. Per-row values identical to
+        the split path (same convert, same torch mean).
+        """
+        hd = q.shape[-1]
+        nq = q.numel() // hd
+        nk = k.numel() // hd
+        total = nq + nk
+        xf = torch.empty(total, hd, dtype=torch.float32, device=q.device)
+        x2 = torch.empty(total, hd, dtype=torch.float32, device=q.device)
+        qk_convert_kernel[(total,)](q, k, xf, x2, nq, q.shape[1], q.stride(0),
+                                    k.shape[1], k.stride(0), hd)
+        var = x2.mean(dim=-1, keepdim=True).view(total)
+        return xf, var
+
     def _rms_one(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """Standard no-residual RMSNorm for one tensor (bit-identical to the
         old RMSNorm(x) path: torch mean reduction, Triton convert+scale)."""
