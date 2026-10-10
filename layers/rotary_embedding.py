@@ -6,6 +6,68 @@ import triton.language as tl
 
 
 @triton.jit
+def rotary_emb_merged_kernel(
+    q_ptr, k_ptr,
+    cache_ptr,      # cos_sin_cache (max_pos, 1, 2*half_dim)
+    pos_ptr,        # (num_tokens,) long positions
+    outq_ptr, outk_ptr,
+    num_q_heads,
+    num_k_heads,
+    cache_stride,   # row stride of the cache (2*half_dim)
+    half_dim: tl.constexpr,
+):
+    """Fused RoPE for both q and k in ONE launch (bit-identical to two calls).
+
+    program (token, h) with h in [0, num_q_heads+num_k_heads); h < num_q_heads
+    applies to q else k. Same cos/sin cache lookup by position, same fp32 math.
+    """
+    token = tl.program_id(0)
+    h = tl.program_id(1)
+    offs = tl.arange(0, half_dim)
+    pos = tl.load(pos_ptr + token)
+    cb = pos * cache_stride + offs
+    cos = tl.load(cache_ptr + cb).to(tl.float32)
+    sin = tl.load(cache_ptr + cb + half_dim).to(tl.float32)
+    if h < num_q_heads:
+        base = (token * num_q_heads + h) * (2 * half_dim)
+        x1 = tl.load(q_ptr + base + offs).to(tl.float32)
+        x2 = tl.load(q_ptr + base + half_dim + offs).to(tl.float32)
+        y1 = x1 * cos - x2 * sin
+        y2 = x2 * cos + x1 * sin
+        tl.store(outq_ptr + base + offs, y1.to(q_ptr.dtype.element_ty))
+        tl.store(outq_ptr + base + half_dim + offs, y2.to(q_ptr.dtype.element_ty))
+    else:
+        hh = h - num_q_heads
+        base = (token * num_k_heads + hh) * (2 * half_dim)
+        x1 = tl.load(k_ptr + base + offs).to(tl.float32)
+        x2 = tl.load(k_ptr + base + half_dim + offs).to(tl.float32)
+        y1 = x1 * cos - x2 * sin
+        y2 = x2 * cos + x1 * sin
+        tl.store(outk_ptr + base + offs, y1.to(k_ptr.dtype.element_ty))
+        tl.store(outk_ptr + base + half_dim + offs, y2.to(k_ptr.dtype.element_ty))
+
+
+def apply_rotary_emb_merged(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused RoPE for q+k in one kernel launch (bit-identical to torch)."""
+    num_tokens = query.shape[0]
+    num_q_heads = query.shape[1]
+    num_k_heads = key.shape[1]
+    half_dim = query.shape[2] // 2
+    outq = torch.empty_like(query)
+    outk = torch.empty_like(key)
+    rotary_emb_merged_kernel[(num_tokens, num_q_heads + num_k_heads)](
+        query, key, cos_sin_cache, positions, outq, outk,
+        num_q_heads, num_k_heads, cos_sin_cache.stride(0), half_dim,
+    )
+    return outq, outk
+
+
+@triton.jit
 def rotary_emb_fused_kernel(
     x_ptr,
     cache_ptr,      # cos_sin_cache (max_pos, 1, 2*half_dim)
@@ -128,9 +190,7 @@ class RotaryEmbedding(nn.Module):
                 positions: torch.Tensor,
                 query: torch.Tensor,
                 key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        query = apply_rotary_emb_fused(query, positions, self.cos_sin_cache)
-        key = apply_rotary_emb_fused(key, positions, self.cos_sin_cache)
-        return query, key
+        return apply_rotary_emb_merged(query, key, positions, self.cos_sin_cache)
 
 
 def get_rope(
