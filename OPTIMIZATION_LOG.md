@@ -11,6 +11,7 @@
 | 4 | drop GPU round-trip in add_async_request tokenization | 456.70 | 95.77 | 5.53 | 0.998x |
 | 5 | fuse RMSNorm convert+residual-add, fold rsqrt into tail | 459.65 | 62.50 | 4.67 | 1.004x  MILESTONE (beats vLLM) |
 | 6 | fold RMSNorm pow into convert kernel (drop separate pow launch) | 459.42 | 54.07 | 4.47 | 1.003x |
+| 7 | CUDA-graph prefill (pre-captured exact-shape graphs; eager prefill was host-bound ~40ms/step) | 459.27 | 19.86 | 4.28 | 1.003x |
 | - | vLLM 0.31.0 target (this machine, 2026-10-09) | 457.86 | 17.87 | 3.18 | 1.00x |
 
 ## Experiments tried
@@ -23,6 +24,7 @@
 | 4 | Drop GPU round-trip in add_async_request tokenization | sync | KEPT | +0.1 | tokenizer ids moved to CUDA and back for no reason; also put a GPU sync on the submission path. sum_submit 0.85->0.30s |
 | 5 | Fuse RMSNorm convert+residual-add, fold rsqrt into tail (tl.rsqrt == torch.rsqrt) | kernel | KEPT | +2.9 | RMSNorm ~7->4 kernels/call; graph replay 4.65->3.84ms; TPOT 5.53->4.66ms. First time beats vLLM (MILESTONE) |
 | 12 | Fold RMSNorm pow (x*x) into convert_add kernel; keep mean reduction in torch | kernel | KEPT | ~0 (TPOT -4%) | x*x bit-identical to torch.pow(x,2); removes 113 pow launches/step. TPOT 4.66->4.47ms, throughput neutral |
+| 13 | CUDA-graph prefill: pre-captured exact-shape graphs (eager prefill host-bound ~40ms/step) | graphs | KEPT | ~0 (TTFT 54->20ms) | eager prefill = 680 kernel launches at ~66us each (~40ms) for only ~7ms GPU; exact-shape graph replay is 8ms and bit-identical. TTFT mean 54->20ms, TPOT 4.47->4.27ms |
 
 ## Details
 
@@ -128,6 +130,19 @@
 - Outcome: KEPT (throughput neutral within noise, TPOT consistently -4%, no latency regression)
 - Why it worked: x*x is bit-identical to torch.pow(x,2), and the mean reduction is unchanged, so the numerics are untouched; only a redundant kernel launch is removed.
 - Worth retrying? NO (done).
+
+## [13] 2026-10-10 04:40  CUDA-graph prefill (pre-captured exact shapes) (KEPT, TTFT 54->20ms)
+- Hypothesis and expected gain: eager prefill is host-bound. debug/prefillprof.py: a prefill forward of just 26-134 tokens costs 41ms GPU wall (CUDA event) yet the kernels sum to only ~7ms -> ~34ms of launch/dispatch gaps. Prefill steps happen 396x in the benchmark, so each 41ms step also stalls the run_loop pipeline. Exact-shape CUDA-graph replay measured 8ms and bit-identical -> TTFT should drop from ~54ms to ~15ms and free ~13s of pipeline time.
+- Profile evidence: prefillhost.py: 680 kernel launches/step at ~66us host cost each = 45ms enqueue (mean 1.62ms/layer). prefillgraph.py: eager 42.3ms vs graph replay 7.98ms, bit_eq=True. capturetiming.py: capture body ~190ms (inherent), warmup 44ms after JIT. prefillshapes.py: benchmark has only 54 distinct (num_seqs, total_tokens) prefill shapes, almost all bs=1, tokens 13-113.
+- Related earlier entries: [1] (decode graphs), none for prefill.
+- Change: src/run.py - run_model routes prefill through run_prefill(); new _capture_prefill_graph (captures one graph per exact shape into a shared pool, slot_mapping forced -1 so capture never writes KV) and pre_capture_prefill_graphs (pre-captures (1, S) for S=1..128 at init, invisible to benchmark elapsed which is measured after engine init). Lazy capture remains as fallback for shapes outside the grid (multi-seq, longer prompts), capped at 256 graphs. Init went 30->37.5s (pre-capture efficient, ~55ms/shape).
+- Correctness: PASS - bs=1 graph 0/37 vs eager reference; batched graph run1 vs run2 0/37. (Padding to buckets was rejected: flash_attn_varlen is NOT bit-identical when padding crosses a 256-token boundary, debug/prefillpadtest.py; exact shapes only.)
+- Benchmark before (exp 12): 459.14-459.42 tok/s, TTFT 54.1/31.1/526, TPOT 4.47/4.97, ITL 4.47/4.80
+- Benchmark after (2 runs): 458.57 then 459.27 tok/s, TTFT mean 19.9-20.5 p50 5.1-5.4 p99 370-404, TPOT 4.25-4.28/4.6-5.1, ITL 4.25-4.28/4.8-5.0
+- Gap to vLLM now: throughput 1.003x, TPOT 1.34x (was 1.47x), TTFT 1.12x (was 3.4x)  <- TTFT near-parity, p50 (5.1ms) far better than vLLM mean
+- Outcome: KEPT
+- Why it worked: prefill was dominated by host dispatch (680 launches * ~66us) not GPU work; pre-recording the ops into a CUDA graph removes all launch overhead while keeping the exact same kernels/shapes, hence bit-identical output. Throughput stayed flat (~459) because the benchmark tail is decode-bound, not prefill-bound; the win is on latency (TTFT mean 54->20ms, p50 31->5ms).
+- Worth retrying? NO (done). Follow-up: TTFT p99 tail (370ms) is scheduler queueing when all 5 decode slots are full; separate scheduler experiment.
 
 ## Backlog
 
