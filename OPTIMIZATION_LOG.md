@@ -22,6 +22,7 @@
 | 14 | fuse qk-norm scale into rotary kernel (scale+rotate) | 460.13 | 9.39 | 3.57 | 1.005x |
 | 15 | single-tensor prepare_decode (one H2D in graph mode) | 459.51 | 8.93 | 3.52 | 1.004x |
 | 16 | drop redundant graph-vars fills (exact-bs graphs) | 460.10 | 9.39 | 3.51 | 1.005x |
+| 17 | fuse paged-KV store into scale+rotary kernel (drop store_kvcache) | 459.94 | 8.58 | 3.47 | 1.005x |
 
 ## Experiments tried
 
@@ -46,6 +47,7 @@
 | 23 | fuse qk-norm scale into rotary kernel (scale+rotate in one launch) | kernel | KEPT | ~0 (TPOT -1.4%, TTFT +) | QKNorm (bs>=2) now emits fp32 xf/var via prepare(); a new scale_rotate_kernel does the RMSNorm scale AND RoPE in one launch (was qk_scale 28 kernels + rotary 28 = 56 -> 28). Bit-identical (bf16 roundings match qk_scale exactly). decode_time 3136->3089us. TPOT 3.62->3.57, throughput 460.5 (1.006x vLLM) |
 | 24 | single-tensor prepare_decode (one H2D in graph mode) | sync | KEPT | ~0 (TPOT -1.3%) | prepare built 4 GPU tensors (input_ids/positions/context_lens/slot_mapping) = 4 H2D dispatches (~100us). Graph mode now builds one (bs,4) int32 tensor + strided column views (the graph-vars copies handle strides and int32->long casts); eager mode keeps the contiguous path. prepare 0.12->0.08ms. TPOT 3.57->3.52, TTFT 9.4->8.9 |
 | 25 | drop redundant graph-vars fills (exact-bs graphs never read padding) | sync | KEPT | ~0 (TPOT -0.3%) | graph_bs=[1,2,3,4,5] gives an exact graph for every bs, so the graphs never read beyond row bs; the 3 fills (slot_mapping/context_lens/block_tables) only reset rows the graphs never touch. Removed them (kept only when use_bs != bs, i.e. larger-graph padding). replay-launch 0.11->0.08ms, step 3.46->3.41. TPOT 3.525->3.515, throughput 460.1 |
+| 26 | fuse paged-KV store into scale+rotary kernel (drop store_kvcache) | kernel | KEPT | ~0 (TPOT -1.4%) | the decode q/k chain was prepare + scale_rotate + store_kvcache (28 kernels). scale_rotate now also writes the rotated k and v into the paged KV cache at the token slot for k-heads (same values/slot/offsets as store_kvcache) -> store_kvcache dropped from decode (kept for prefill and the bs=1 separate path via a context.kv_stored flag). Unit test: full attention chain bit-identical at seqlen 50/120/256. decode_time 3089->3039us. TPOT 3.515->3.465, throughput 460.3 |
 
 ## Details
 
@@ -278,6 +280,19 @@
 - Gap to vLLM now: throughput 1.005x, TPOT 1.11x, TTFT 0.53x
 - Outcome: KEPT
 - Why it worked: the fills were a leftover from when graphs padded up to a larger shape; with exact per-bs graphs the padding rows are never read, so the fills were pure overhead.
+- Worth retrying? NO (done).
+
+## [26] 2026-10-10 10:10  Fuse paged-KV store into scale+rotary kernel (KEPT)
+- Hypothesis and expected gain: decode attention chain was qk prepare + scale_rotate (rotated q/k) + store_kvcache (28 kernels) + flash. The flash reads the paged cache, and the rotated k's only consumer is store_kvcache, so the scale_rotate kernel (which already computes the rotated k and has v available) can write both into the cache -> drop store_kvcache from decode, 28 fewer kernels/step.
+- Profile evidence: kernel categories store_kvcache 28 kernels/85us. decode_time 3089us (exp 25 baseline) -> 3039us = -50us/step.
+- Related earlier entries: [23] (scale+rotary fuse), [16] (flash in-kernel store FAILED because flash reads the fresh token from registers - here we keep the separate cache write with identical values, so numerics are unchanged).
+- Change: layers/rotary_embedding.py - scale_rotate_kernel writes rotated k + v to the paged cache for k-heads (slot*num_kv_heads*head_dim + hh*head_dim); RotaryEmbedding.scale_rotate takes v/k_cache/v_cache/slot_mapping/num_kv_heads/v_stride. layers/attention.py - decode skips store_kvcache when context.kv_stored (bs>=2 fused path); prefill and bs=1 still store. utils/context.py - kv_stored flag. src/qwen3.py - sets kv_stored and passes the cache/v to scale_rotate. commit e8e0246.
+- Correctness: PASS - unit test: (prepare+scale_rotate_with_store+flash) vs (scale+rotary+store_kvcache+flash) bit-identical outputs AND k_cache/v_cache contents at seqlen 50/120/256; bs=1 gate 0/37 (separate path unchanged); batched run1 vs run2 0/37.
+- Benchmark before (exp 25): 460.08/460.12 tok/s, TTFT 10.52/8.25, TPOT 3.52/3.51, ITL 3.52/3.51
+- Benchmark after (2 runs): 459.58/460.30 tok/s, TTFT 9.14/8.02 (p99 194/142), TPOT 3.47/3.46 (p99 3.70/3.67), ITL 3.47/3.47
+- Gap to vLLM now: throughput 1.005x, TPOT 1.09x (was 1.11x), TTFT 0.48x
+- Outcome: KEPT
+- Why it worked: unlike exp 16 (flash in-kernel store, which changed numerics by reading the fresh token from registers), this keeps the K/V values written to the cache byte-identical to store_kvcache (same values, same slot, same per-head offsets), so the flash reads an identical cache. The store is just relocated into an existing kernel that already has the rotated k in registers.
 - Worth retrying? NO (done).
 
 ## Backlog
