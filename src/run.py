@@ -99,6 +99,7 @@ class Run:
         self.graphs = {}
         self.graphs_fast = {}
         self.graph_pool = None
+        self._padded_bt = {}   # seq_id -> padded (max_num_blocks,) int32 row
         self.graph_bs = []
         self.graph_vars = {}
         self.prefill_graphs = {}
@@ -462,6 +463,25 @@ class Run:
             next_token_ids = None
         return next_token_ids
 
+    def _padded_bt_row(self, seq):
+        """Padded (max_num_blocks,) block-table row for a sequence, cached.
+
+        A sequence's block table is allocated once at admission for its full
+        max length and never changes, so the padded GPU row is constant; the
+        old per-step torch.full+torch.cat rebuilt it every decode step."""
+        cached = self._padded_bt.get(seq.seq_id)
+        if cached is None:
+            bt_row = seq.block_table[0]
+            if bt_row.size(0) < self.max_num_blocks:
+                pad = torch.full(
+                    (self.max_num_blocks - bt_row.size(0),),
+                    -1, dtype=torch.int32, device=self.device,
+                )
+                bt_row = torch.cat([bt_row, pad], dim=0)
+            self._padded_bt[seq.seq_id] = bt_row
+            cached = bt_row
+        return cached
+
     def prepare_prefill(self, seqs):
         input_ids = []
         positions = []
@@ -489,14 +509,7 @@ class Run:
 
             # GPU stack of per-seq block tables (no .tolist() sync), padded so
             # all rows have the same width.
-            bt_row = seq.block_table[0]
-            if bt_row.size(0) < self.max_num_blocks:
-                pad = torch.full(
-                    (self.max_num_blocks - bt_row.size(0),),
-                    -1, dtype=torch.int32, device=self.device,
-                )
-                bt_row = torch.cat([bt_row, pad], dim=0)
-            block_tables.append(bt_row)
+            block_tables.append(self._padded_bt_row(seq))
 
         device = torch.device(self.device)
 
@@ -530,6 +543,7 @@ class Run:
         positions = []
         context_lens = []
         block_tables = []
+        slots = []
         max_ctx = 0
 
         for seq in seqs:
@@ -540,28 +554,23 @@ class Run:
             context_lens.append(len(seq.token_ids))
             max_ctx = max(max_ctx, len(seq.token_ids))
 
-            bt_row = seq.block_table[0]
-            if bt_row.size(0) < self.max_num_blocks:
-                pad = torch.full(
-                    (self.max_num_blocks - bt_row.size(0),),
-                    -1, dtype=torch.int32, device=self.device,
-                )
-                bt_row = torch.cat([bt_row, pad], dim=0)
-            block_tables.append(bt_row)
+            # Slots computed on CPU from the (CPU) block_table_ids list: the
+            # block for position p is block_table_ids[p // block_size]. This
+            # avoids the per-step GPU integer ops and needs no .item() syncs.
+            slots.append(
+                seq.block_table_ids[pos // self.block_size] * self.block_size
+                + pos % self.block_size
+            )
+            block_tables.append(self._padded_bt_row(seq))
 
         device = torch.device(self.device)
 
         input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
         positions = torch.tensor(positions, dtype=torch.long, device=device)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, device=device)
+        slot_mapping = torch.tensor(slots, dtype=torch.int32, device=device)
 
         bt = torch.stack(block_tables, dim=0)  # (bs, max_num_blocks)
-
-        # Slots entirely on GPU (no .item() syncs per step).
-        logical_ids = positions // self.block_size          # int64, for indexing
-        offsets = (positions % self.block_size).to(torch.int32)
-        row_ids = torch.arange(positions.size(0), device=device)
-        slot_mapping = bt[row_ids, logical_ids] * self.block_size + offsets  # int32
 
         set_context(
             is_prefill=False,

@@ -223,6 +223,7 @@ class Engine:
 
         for seq in finished:
             self.block_manager.deallocate(seq.block_table_ids)
+            self.RUN._padded_bt.pop(seq.seq_id, None)
 
         return finished
 
