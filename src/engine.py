@@ -90,6 +90,14 @@ class Engine:
         # (pos/ctx_len/slot/block-table) into tbuf during the previous step's
         # GPU wait, so the next decode step only overwrites the token column.
         self._spec_ids = None
+
+        # Persistent CUDA event reused across decode steps (exp 57). Each step
+        # fully busy-polls this event to completion before the next record, so
+        # reuse is safe and drops the per-step torch.cuda.Event() creation from
+        # the exposed CPU path (was ~2-12us/step). Bound record avoids the
+        # per-step attribute lookup.
+        self._ev = torch.cuda.Event()
+        self._ev_record = self._ev.record
  
     async def add_async_request(self, prompt: str, sampling_params: SamplingParams | None = None) -> int:
         if sampling_params is None:
@@ -292,8 +300,8 @@ class Engine:
             # The decode graph's LAST op is the greedy argmax writing the next
             # token ids into tbuf_tok (exp 47), so there is no per-step
             # torch.argmax dispatch here. Only the completion wait is deferred.
-            ev = torch.cuda.Event()
-            ev.record()
+            # Persistent event reused across steps (exp 57).
+            self._ev_record()
 
         # Wait for the GPU without blocking the event loop. Poll the event
         # instead of delegating to the executor: run_in_executor(None,
@@ -309,7 +317,7 @@ class Engine:
         # between decode steps) and the current token counts, not on this
         # step's tokens. If a seq finishes or a prefill lands, the seq-id
         # comparison on the next step falls back to a full rebuild.
-        if not ev.query():
+        if not self._ev.query():
             try:
                 with torch.inference_mode():
                     self._spec_ids = tuple(s.seq_id for s in seqs)
@@ -319,7 +327,7 @@ class Engine:
         else:
             self._spec_ids = None
 
-        while not ev.query():
+        while not self._ev.query():
             await asyncio.sleep(0)
 
         with torch.inference_mode():

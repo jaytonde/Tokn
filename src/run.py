@@ -375,6 +375,18 @@ class Run:
         )
         self._pin_tok = pin_tok
         self._pin_tok_np = pin_tok.numpy()
+        # Bound replay methods + pre-sliced per-bs views so run_model and
+        # prepare_decode(token_only) avoid per-step dict lookups / generator
+        # scans / tensor slicing on the exposed CPU path (exp 57).
+        self._replays = {bs: g.replay for bs, g in self.graphs.items()}
+        self._fast_replays = {bs: g.replay for bs, g in self.graphs_fast.items()}
+        self._tok_views = {}
+        self._state0_views = {}
+        self._out_views = {}
+        for bs in self.graph_bs:
+            self._tok_views[bs] = tbuf_tok[:bs]
+            self._state0_views[bs] = tbuf_state[:bs, 0]
+            self._out_views[bs] = outputs[:bs]
 
     def run_model(self, input_ids, positions, is_prefill):
 
@@ -397,26 +409,19 @@ class Run:
 
         bs      = input_ids.size(0)
         context = get_context()
-        pool    = self.graphs_fast if context.use_fast_flash else self.graphs
-        use_bs  = next(x for x in self.graph_bs if x >= bs)
-        graph   = pool[use_bs]
-        gv      = self.graph_vars
 
-        # prepare_decode already wrote the next tokens into gv["tbuf_tok"] and
-        # the state columns (pos/ctx_len/slot/block-table) into gv["tbuf_state"]
-        # (H2D; possibly split across the speculative-prep of the previous step,
-        # exp 41). The decode graph's first kernels distribute them into the
-        # model's input buffers (g_input/g_pos/g_slot/g_ctx/block_tables), so
-        # run_model is a SINGLE graph replay. The use_bs != bs branch is dead
-        # with exact per-bs graphs (bs <= max_bs always matches); kept for
-        # safety with a larger fallback batch.
-        if use_bs != bs:
-            gv["g_slot"].fill_(-1)          # padding rows write nowhere
-            gv["g_ctx"].zero_()             # padding rows attend to nothing
-            gv["block_tables"].fill_(-1)    # keep padding deterministic (-1)
-        graph.replay()
+        # Bound replay dicts (fast/splitkv) + pre-sliced view cache: run_model
+        # is now just a dict lookup + a bound call + a pre-sliced return, no
+        # per-step generator scan (`next(x for x in graph_bs if x >= bs)`) or
+        # tensor slicing. bs <= graph_bs[-1] always holds here (admission
+        # control + the guard above), and exact per-bs graphs exist for every
+        # bs, so use_bs == bs (the old use_bs != bs fills were dead code).
+        if context.use_fast_flash:
+            self._fast_replays[bs]()
+        else:
+            self._replays[bs]()
 
-        return gv["outputs"][:bs]
+        return self._out_views[bs]
 
     def run_prefill(self, input_ids, positions):
         """Prefill via lazily-captured exact-shape CUDA graphs.
@@ -647,8 +652,10 @@ class Run:
         # pre-computed during the previous step's GPU wait (async pinned H2D).
         if token_only:
             n = len(seqs)
-            gv = self.graph_vars
-            return gv["tbuf_tok"][:n], gv["tbuf_state"][:n, 0]
+            # Pre-sliced per-bs views (exp 57): the buffers are static and the
+            # running-set check already fired, so the token_only path is two
+            # dict lookups, no tensor slicing.
+            return self._tok_views[n], self._state0_views[n]
 
         if spec_next:
             state_rows = []
