@@ -92,11 +92,22 @@ class Qwen3Attention(nn.Module):
         if not self.qkv_bias:
             nk = q.shape[0] * k.shape[1]
             if nk < 16:
-                # bs=1: separate norm path (torch reduce config differs merged)
+                # bs=1: fused qk path. The q and k means are reduced SEPARATELY
+                # (a merged mean would change the k reduce config and break
+                # bit-identity), but the convert is one kernel and the scale+
+                # RoPE+KV-store is the same fused scale_rotate as bs>=2. This
+                # replaces the old 8 kernels/layer (q norm 3 + k norm 3 +
+                # rotary 1 + store_kvcache 1) with 4 (qk_convert + q mean +
+                # k mean + scale_rotate), ~112 fewer kernels/step.
                 ctx = get_context()
-                ctx.kv_stored = False
-                q, k = self.qk_norm(q, k)
-                q, k = self.rotary_emb(positions, q, k)
+                ctx.kv_stored = True
+                xf, var_q, var_k = self.qk_norm.prepare_bs1(q, k)
+                q, k = self.rotary_emb.scale_rotate(
+                    positions, xf, var_q, var_k, self.qk_norm.w_q, self.qk_norm.w_k,
+                    q.shape, k.shape, self.qk_norm.eps,
+                    v, self.attn.k_cache, self.attn.v_cache, ctx.slot_mapping,
+                    self.num_kv_heads, v.stride(0),
+                )
             else:
                 # Fused scale+rotary+KV-store: QKNorm emits fp32 xf/var, the
                 # rotary kernel does the RMSNorm scale, RoPE and the paged-cache
@@ -105,7 +116,8 @@ class Qwen3Attention(nn.Module):
                 ctx.kv_stored = True
                 xf, var = self.qk_norm.prepare(q, k)
                 q, k = self.rotary_emb.scale_rotate(
-                    positions, xf, var, self.qk_norm.w_q, self.qk_norm.w_k,
+                    positions, xf, var[:q.shape[0] * q.shape[1]], var[q.shape[0] * q.shape[1]:],
+                    self.qk_norm.w_q, self.qk_norm.w_k,
                     q.shape, k.shape, self.qk_norm.eps,
                     v, self.attn.k_cache, self.attn.v_cache, ctx.slot_mapping,
                     self.num_kv_heads, v.stride(0),

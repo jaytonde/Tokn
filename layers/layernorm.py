@@ -141,6 +141,28 @@ class QKNorm(nn.Module):
         var = x2.mean(dim=-1, keepdim=True).view(total)
         return xf, var
 
+    def prepare_bs1(self, q: torch.Tensor, k: torch.Tensor):
+        """bs=1 fused convert + SEPARATE q/k means -> (xf, var_q, var_k).
+
+        At bs=1 the merged (24,128) mean changes the k-reduce config vs a
+        standalone (8,128) tensor, so a single x2.mean(-1) over all rows would
+        break bit-identity (see the forward() fallback note). The convert is
+        elementwise per-row and IS identical when merged, so one qk_convert
+        kernel covers q+k, then the q and k means are torch reductions over
+        their own contiguous row slices (same shapes as the old standalone
+        q_norm/k_norm calls -> same reduce config -> bit-identical)."""
+        hd = q.shape[-1]
+        nq = q.numel() // hd
+        nk = k.numel() // hd
+        total = nq + nk
+        xf = torch.empty(total, hd, dtype=torch.float32, device=q.device)
+        x2 = torch.empty(total, hd, dtype=torch.float32, device=q.device)
+        qk_convert_kernel[(total,)](q, k, xf, x2, nq, q.shape[1], q.stride(0),
+                                    k.shape[1], k.stride(0), hd)
+        var_q = x2[:nq].mean(dim=-1)   # (nq,), same reduce as standalone q norm
+        var_k = x2[nq:].mean(dim=-1)   # (nk,), same reduce as standalone k norm
+        return xf, var_q, var_k
+
     def _rms_one(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """Standard no-residual RMSNorm for one tensor (bit-identical to the
         old RMSNorm(x) path: torch mean reduction, Triton convert+scale)."""

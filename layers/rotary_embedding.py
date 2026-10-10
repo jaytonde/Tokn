@@ -8,7 +8,8 @@ import triton.language as tl
 @triton.jit
 def scale_rotate_kernel(
     xf_ptr,            # fp32 (total_rows, 2*half_dim)
-    var_ptr,           # fp32 (total_rows,)
+    var_q_ptr,         # fp32 (n_q_rows,)
+    var_k_ptr,         # fp32 (n_k_rows,)
     wq_ptr, wk_ptr,    # bf16 (2*half_dim,)
     cache_ptr,         # cos_sin_cache (max_pos, 1, 2*half_dim)
     pos_ptr,           # (num_tokens,) long
@@ -29,7 +30,11 @@ def scale_rotate_kernel(
     rotate with cos/sin from the position cache. For k heads it ALSO writes the
     rotated k and the corresponding v into the paged KV cache at the token's
     slot, replacing the separate store_kvcache kernel (bit-identical: same
-    values, same slot, same per-head offsets)."""
+    values, same slot, same per-head offsets).
+
+    var_q/var_k are separate tensors so the bs=1 path (which must reduce q and
+    k separately to keep torch's reduce config) needs no var assembly; the
+    bs>=2 path just passes slices of the merged var (views, no copy)."""
     token = tl.program_id(0)
     h = tl.program_id(1)
     lo = tl.arange(0, half_dim)
@@ -43,14 +48,17 @@ def scale_rotate_kernel(
         w_ptr = wq_ptr
         out_ptr = outq_ptr
         out_base = row * (2 * half_dim)
+        var = tl.load(var_q_ptr + row)
     else:
         hh = h - num_q_heads
-        row = n_q_rows + token * num_k_heads + hh
+        krow = token * num_k_heads + hh
+        row = n_q_rows + krow
         w_ptr = wk_ptr
         out_ptr = outk_ptr
-        out_base = (token * num_k_heads + hh) * (2 * half_dim)
+        out_base = krow * (2 * half_dim)
+        var = tl.load(var_k_ptr + krow)
 
-    inv = tl.rsqrt(tl.load(var_ptr + row) + eps)
+    inv = tl.rsqrt(var + eps)
     x1 = tl.load(xf_ptr + row * (2 * half_dim) + lo)
     x2 = tl.load(xf_ptr + row * (2 * half_dim) + half_dim + lo)
     w1 = tl.load(w_ptr + lo)
@@ -268,7 +276,8 @@ class RotaryEmbedding(nn.Module):
     def scale_rotate(self,
                      positions: torch.Tensor,
                      xf: torch.Tensor,
-                     var: torch.Tensor,
+                     var_q: torch.Tensor,
+                     var_k: torch.Tensor,
                      w_q: torch.Tensor,
                      w_k: torch.Tensor,
                      q_shape,
@@ -283,7 +292,9 @@ class RotaryEmbedding(nn.Module):
         """Fused RMSNorm-scale + RoPE + paged-KV store for q and k.
 
         Bit-identical to qk_scale then rotary then store_kvcache, in one
-        kernel launch."""
+        kernel launch. var_q/var_k: per-row RMSNorm variance tensors for q and
+        k rows (bs>=2 passes slices of the merged var; bs=1 passes the
+        separately-reduced q/k vars)."""
         num_tokens = q_shape[0]
         num_q_heads = q_shape[1]
         num_k_heads = k_shape[1]
@@ -292,7 +303,7 @@ class RotaryEmbedding(nn.Module):
         outq = torch.empty(q_shape, dtype=torch.bfloat16, device=xf.device)
         outk = torch.empty(k_shape, dtype=torch.bfloat16, device=xf.device)
         scale_rotate_kernel[(num_tokens, num_q_heads + num_k_heads)](
-            xf, var, w_q, w_k, self.cos_sin_cache, positions, outq, outk,
+            xf, var_q, var_k, w_q, w_k, self.cos_sin_cache, positions, outq, outk,
             k_cache, v_cache, v, slot_mapping,
             num_q_heads, num_k_heads, n_q_rows, self.cos_sin_cache.stride(0),
             num_kv_heads, v_stride, half_dim, eps,
