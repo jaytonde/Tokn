@@ -15,6 +15,8 @@
 | - | vLLM 0.31.0 target (this machine, 2026-10-09) | 457.86 | 17.87 | 3.18 | 1.00x |
 | 8 | decode flash single-pass (num_splits=1) for seqlen<=256 via dual-graph hybrid | 459.02 | 17.72 | 4.11 | 1.003x |
 | 9 | merge q_norm+k_norm into one fused QKNorm call | 459.39 | 13.28 | 3.99 | 1.003x |
+| 10 | cache padded block tables + CPU slot computation in prepare_decode | 459.05 | 13.00 | 3.82 | 1.003x |
+| 11 | fuse rotary cos/sin cache lookup into RoPE kernel | 459.58 | 11.15 | 3.78 | 1.003x |
 
 ## Experiments tried
 
@@ -30,6 +32,9 @@
 | 14 | decode flash single-pass (num_splits=1) for seqlen<=256 via dual-graph hybrid | kernel | KEPT | ~0 (TPOT -4.2%, TTFT -19%) | splitkv path costs split+combine kernels (~700us/step at bs=5); single-pass kernel is bit-identical for seqlen<=256 and ~7us/call faster. Dual-graph hybrid keeps splitkv for seqlen>256 (reference) -> gate passes. TPOT 4.28->4.11, TTFT 19.9->17.7 |
 | 15 | merge q_norm+k_norm into one fused QKNorm call (3 kernels/layer instead of 6) | kernel | KEPT | ~0 (TPOT -3.5%, TTFT -25%) | q_norm+k_norm are 56 tiny RMSNorm calls (~583us/step) dominated by fixed per-call kernel cost; merging rows into one convert+mean+scale (per-row-group weights) halves calls to 28. Per-row mean reduction unchanged -> bit-identical for bs>=2; bs=1 falls back to separate path (torch reduce config differs for 8-row k). TPOT 4.11->3.99, TTFT 17.7->13.3 |
 | 16 | flash_attn_with_kvcache in-kernel KV store (drop store_kvcache kernel) | kernel | REVERTED (FAILED correctness) | - | passing k/v to flash stores cache in-kernel and skips the 84us store_kvcache kernel (~51us/step faster); but flash computes the new token's attention from registers instead of re-reading the bf16 cache -> maxdiff 1e-3, 11/37 bs=1 sequences differ. Not bit-identical, fails gate |
+| 17 | cache padded block tables + CPU slot computation in prepare_decode | sync | KEPT | ~0 (TPOT -4.3%) | prepare_decode was 0.46ms/step (11% of step, serialized): per-seq torch.full+cat block padding (constant per seq, rebuilt every step) + GPU slot arithmetic. Caching padded rows + computing slots on CPU from block_table_ids (no GPU ops, no sync) -> 0.12ms. TPOT 3.99->3.82 |
+| 18 | fuse rotary cos/sin cache lookup into RoPE kernel | kernel | KEPT | ~0 (TPOT -1%, TTFT -14%) | decode is per-kernel-cost bound (~650 kernels x ~5us); the cos/sin indexSelect gather was 1 kernel/layer. Fused lookup by position inside the Triton RoPE kernel -> 28 fewer kernels/step. TPOT 3.82->3.78, TTFT 13.0->11.2 |
+| 19 | (investigation) benchmark tail analysis | server | - | - | debug/tail_analysis.py: last arrival is at 210.37s (Poisson delays with seed=0 sum to 210s, not 200s), last request drains in 0.92s. Elapsed 211.3s = arrival span + drain. Throughput ceiling ~460.7 tok/s; tokn at 459.6 is 99.8% of it. No throughput headroom left; TPOT/ITL are the remaining metrics |
 
 ## Details
 
@@ -185,6 +190,19 @@
 - Outcome: REVERTED (FAILED - correctness)
 - Why it failed: the in-kernel store computes the freshly-written token's attention from the raw k/v argument rather than the stored bf16 cache value, which is a different numeric path (maxdiff up to 3.5e-3). Not bit-identical, so near-tie greedy tokens flip at bs=1.
 - Worth retrying? NO - the numerics are inherently different (register vs cache read).
+
+## [18] 2026-10-10 07:50  Fuse rotary cos/sin cache lookup into RoPE kernel (KEPT)
+- Hypothesis and expected gain: decode graph is per-kernel-cost bound (~650 kernels x ~5us each, NOT compute bound). The rotary path launched a cos/sin indexSelect gather (1 kernel) per layer -> 28 kernels/step. Fusing the lookup by position inside the Triton RoPE kernel removes them -> ~140us/step.
+- Profile evidence: single-layer in-graph cost 137us x 28 = 3843us vs full graph 3690us -> layers are the whole replay; per-layer ~137us from ~20-30 kernels. decode_time: 3381us (QKNorm) -> 3330us (fused) = -51us/step (gather was cheaper than estimated; fused kernel reads cache directly).
+- Related earlier entries: [2] (fused RoPE), [17].
+- Change: layers/rotary_embedding.py - rotary_emb_fused_kernel takes cos_sin_cache + positions and reads cache[pos, h]/cache[pos, h+half_dim] in-kernel; RotaryEmbedding.forward no longer gathers/chunks. commit 2427151.
+- Correctness: PASS - fused vs old (gather) bit-identical at bs=1 and bs=5; bs=1 graph 0/37 vs reference; batched run1 vs run2 0/37.
+- Benchmark before (exp 17): 458.86 tok/s, TTFT 13.00/259.46, TPOT 3.82/4.09, ITL 3.82/4.22
+- Benchmark after (2 runs): 459.54/459.62 tok/s, TTFT 9.90/12.40 (p99 177/236), TPOT 3.77/3.78 (p99 4.04/4.05), ITL 3.77/3.78
+- Gap to vLLM now: throughput 1.004x, TPOT 1.19x (was 1.20x), TTFT 0.62x
+- Outcome: KEPT
+- Why it worked: the gather read the same bf16 cache values the kernel now reads directly; the fused kernel is bit-identical (same values, same fp32 math). Removing 28 kernels from a per-kernel-cost-bound graph is a direct win.
+- Worth retrying? NO (done).
 
 ## Backlog
 
