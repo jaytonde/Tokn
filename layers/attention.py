@@ -60,7 +60,12 @@ class Attention(nn.Module):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
         if context.is_prefill:
-            if k_cache.numel() and v_cache.numel():
+            if not context.kv_stored and k_cache.numel() and v_cache.numel():
+                # The fused scale+rotate kernel (bs>=2 / bs=1 fused path) already
+                # wrote the rotated K and V into the paged cache at the token
+                # slots; only the qkv_bias path (kv_stored=False) needs the
+                # separate store here. Skipping the redundant store is
+                # bit-identical (same values, same slots, same offsets).
                 store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
