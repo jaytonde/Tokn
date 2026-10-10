@@ -317,16 +317,20 @@ class Run:
         bs      = input_ids.size(0)
         context = get_context()
         pool    = self.graphs_fast if context.use_fast_flash else self.graphs
-        graph   = pool[next(x for x in self.graph_bs if x >= bs)]
+        use_bs  = next(x for x in self.graph_bs if x >= bs)
+        graph   = pool[use_bs]
         gv      = self.graph_vars
 
         gv["input_ids"][:bs] = input_ids
         gv["positions"][:bs] = positions
-        gv["slot_mapping"].fill_(-1)          # padding rows write nowhere
+        if use_bs != bs:
+            # Only when bs does not exactly match a captured graph do we pad up
+            # to a larger shape; those padding rows need deterministic sentinels.
+            gv["slot_mapping"].fill_(-1)          # padding rows write nowhere
+            gv["context_lens"].zero_()            # padding rows attend to nothing
+            gv["block_tables"].fill_(-1)          # keep padding deterministic (-1)
         gv["slot_mapping"][:bs] = context.slot_mapping
-        gv["context_lens"].zero_()            # padding rows attend to nothing
         gv["context_lens"][:bs] = context.context_lens
-        gv["block_tables"].fill_(-1)          # keep padding deterministic (-1)
         gv["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
 
         graph.replay()
