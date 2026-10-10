@@ -107,6 +107,8 @@ class Run:
         self.prefill_graph_cap = 256
         self.prefill_capture_max = 128
         self.capture_stats = {"n": 0, "wall": 0.0, "shapes": {}}
+        self._device = torch.device(self.device)
+        self._bt_cache = {}   # (seq_id tuple) -> stacked padded block table
 
         print(f"Loading model onto device : {self.device}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model)
@@ -575,8 +577,21 @@ class Run:
 
             block_tables.append(self._padded_bt_row(seq))
 
-        device = torch.device(self.device)
-        bt = torch.stack(block_tables, dim=0)  # (bs, max_num_blocks)
+        device = self._device
+        # The padded block-table rows are constant for a sequence's lifetime
+        # (all blocks are pre-allocated at admission), so the stacked (bs,8)
+        # batch table is constant for a given set+order of sequences. Cache it
+        # by the seq-id tuple: consecutive decode steps reuse the same running
+        # set and skip the torch.stack entirely.
+        key = tuple(s.seq_id for s in seqs)
+        bt = self._bt_cache.get(key)
+        if bt is None:
+            if len(seqs) == 1:
+                bt = block_tables[0].unsqueeze(0)
+            else:
+                bt = torch.stack(block_tables, dim=0)  # (bs, max_num_blocks)
+            if len(self._bt_cache) < 2048:
+                self._bt_cache[key] = bt
 
         if self.enforce_eager:
             # Eager mode: the model reads slot_mapping/context_lens directly
