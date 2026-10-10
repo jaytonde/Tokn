@@ -6,6 +6,58 @@ import triton.language as tl
 
 
 @triton.jit
+def rotary_emb_fused_kernel(
+    x_ptr,
+    cache_ptr,      # cos_sin_cache (max_pos, 1, 2*half_dim)
+    pos_ptr,        # (num_tokens,) long positions
+    out_ptr,
+    num_heads,
+    cache_stride,   # row stride of the cache (2*half_dim)
+    half_dim: tl.constexpr,
+):
+    """Fused RoPE that also does the cos/sin cache lookup by position.
+
+    Reads cos = cache[pos, 0:half_dim], sin = cache[pos, half_dim:2*half_dim]
+    directly, eliminating the per-step indexSelect gather (1 kernel/layer).
+    Bit-identical to the old (gather then apply_rotary_emb): same bf16 cache
+    values, same fp32 upcast, same math."""
+    token = tl.program_id(0)
+    head = tl.program_id(1)
+    row = token * num_heads + head
+    base = row * (2 * half_dim)
+    h = tl.arange(0, half_dim)
+
+    x1 = tl.load(x_ptr + base + h).to(tl.float32)
+    x2 = tl.load(x_ptr + base + half_dim + h).to(tl.float32)
+    pos = tl.load(pos_ptr + token)
+    cb = pos * cache_stride + h
+    cos = tl.load(cache_ptr + cb).to(tl.float32)
+    sin = tl.load(cache_ptr + cb + half_dim).to(tl.float32)
+
+    y1 = x1 * cos - x2 * sin
+    y2 = x2 * cos + x1 * sin
+    tl.store(out_ptr + base + h, y1.to(x_ptr.dtype.element_ty))
+    tl.store(out_ptr + base + half_dim + h, y2.to(x_ptr.dtype.element_ty))
+
+
+def apply_rotary_emb_fused(
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+) -> torch.Tensor:
+    """Fused RoPE with in-kernel cos/sin cache lookup (bit-identical to torch)."""
+    x = x.contiguous()
+    num_tokens = x.shape[0]
+    num_heads = x.shape[1]
+    half_dim = x.shape[2] // 2
+    out = torch.empty_like(x)
+    rotary_emb_fused_kernel[(num_tokens, num_heads)](
+        x, cos_sin_cache, positions, out, num_heads, cos_sin_cache.stride(0), half_dim,
+    )
+    return out
+
+
+@triton.jit
 def rotary_emb_kernel(
     x_ptr,
     cos_ptr,
@@ -76,10 +128,8 @@ class RotaryEmbedding(nn.Module):
                 positions: torch.Tensor,
                 query: torch.Tensor,
                 key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        cos_sin = self.cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        query = apply_rotary_emb(query, cos, sin)
-        key = apply_rotary_emb(key, cos, sin)
+        query = apply_rotary_emb_fused(query, positions, self.cos_sin_cache)
+        key = apply_rotary_emb_fused(key, positions, self.cos_sin_cache)
         return query, key
 
 
