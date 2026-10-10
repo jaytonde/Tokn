@@ -81,6 +81,7 @@
 | 49 | extend use_fast_flash (num_splits=1) above ctx=256 to cut the splitkv penalty at ctx 257-369 | kernel | REVERTED (unsafe) | 0 | debug/splitkv_threshold.py: with RANDOM cache data, ns=1 vs ns=0 diverges (max|d|~1e-3, ndiff 225-500) at EVERY seqlen 250-400 - the bit-identity of single-pass vs splitkv is DATA-DEPENDENT (exp 14's <=256 bit_eq used real structured KV). So there is NO safe threshold above 256: benchmark contexts 257-369 would flip tokens undetected by the gate (whose prompts are short (48 tok) or long (474)). Confirms exp 32's conclusion. The ITL p99 gap (3.48 vs vLLM 3.39) from splitkv steps is blocked. |
 | 50 | submission-path tokenization cost on the event loop | server | NOT A LEVER | 0 | debug/tokenizer_cost.py: apply_chat_template+tokenizer ~0.3ms/request mean, 0.12s total event-loop blocking over 400 requests (0.06% of 210s). Negligible. |
 | 51 | reuse a persistent CUDA event for the decode GPU-wait poll (drop per-step torch.cuda.Event() create, ~12us/step) | sync | REVERTED (neutral) | 0 | two 400-prompt runs TPOT 3.16/3.15, ITL p99 3.69/3.50 vs exp 47's 3.15/3.15, 3.48/3.48 - neutral (one run's 3.69 ITL p99 is burst noise). Saving below the ~40us noise. Reverted (git checkout src/engine.py) to keep the clean exp-47 state. |
+| 52 | force explicit per-bs num_splits on the splitkv decode graphs (ctx>256) to shave the flash splitkv penalty on the slowest (high-bs) steps | kernel | ABANDONED (sub-noise, fragile) | 0 | debug/num_splits_test.py + num_splits_all.py: explicit ns values that match the ns=0 heuristic's split count ARE bit-identical across ctx 257-369 (bs=1/2/3: ns=8, bs=4/5: ns=3; bs=1 ns=8 also bit-identical to ctx 522 = the gate's prefix-prompt range) and ~0.6-2.2us/call faster -> 17-61us/step at splitkv steps. But that is only ~1-2us of the ~13us/call single-pass-vs-splitkv gap (ns=1 is the only fast option and is NOT bit-identical), so the average TPOT gain is ~5-10us (sub-noise) and the ITL p99 gain ~0.04ms. The per-bs ns mapping is fragile and the bit-identity is data-dependent (exp 14/49 lesson) -> risk of silent token flips. Abandoned. |
 
 ## Details
 
@@ -606,6 +607,16 @@
 - Outcome: REVERTED (neutral - no measurable gain, one ITL-p99 outlier run 3.69)
 - Why it failed: the ~10us/step saving is below the ~40us benchmark noise; TPOT 3.16/3.15 is identical to exp 47's 3.15/3.15. Reverted to keep the tree at the clean exp-47 state per the neutral-change discipline.
 - Worth retrying? NO - below noise.
+
+## [52] 2026-10-10 20:00  Force per-bs num_splits on splitkv decode graphs (ABANDONED - sub-noise, fragile)
+- Hypothesis and expected gain: the splitkv flash at ctx>256 costs ~13.5us/call more than single-pass at bs=5 (the ITL p99 driver, 3.48 vs vLLM 3.39). If an explicit num_splits that matches the ns=0 heuristic's split count is bit-identical AND avoids heuristic overhead, forcing it could shave the slowest steps.
+- Profile evidence: debug/num_splits_test.py + num_splits_all.py: for each bs, the ns values bit-identical to ns=0 across ctx 257-369 are {bs=1,2,3: 4,8; bs=4,5: 2,3}; bs=1 ns=8 stays bit-identical to ctx 522 (the gate's prefix-prompt range); bs=4 ns=3 = 111.66 vs ns=0 113.85 (2.19us/call), bs=5 ns=3 = 124.03 vs 125.40 (1.37us/call), bs=1 ns=8 = 103.96 vs 105.12 (1.17us/call). The speedup vs ns=0 is only 0.6-2.2us/call because the explicit matching ns is STILL a splitkv kernel - only the non-identical single-pass (ns=1, 112 vs 125.5 at bs=5) recovers the ~13us/call penalty.
+- Related earlier entries: [14] (hybrid graphs), [32] (single-pass FAILED), [49] (data-dependence of ns1/ns0).
+- Change: NONE (abandoned).
+- Correctness: NOT REACHED (no keeper). Bit-identity verified with torch.equal on RANDOM KV over the full benchmark grid (bs 1-5, ctx 257-369, and bs=1 to 522), but the exp 14/49 lesson is that flash bit-identity is DATA-DEPENDENT - a divergence on real model KV at an untested shape would flip benchmark tokens silently (the gate's multi-seq prompts are short; the benchmark's bs=4/5 at ctx>369 is untested).
+- Outcome: ABANDONED (sub-noise gain, fragile per-bs mapping, data-dependent bit-identity risk)
+- Why it failed: the bit-identical explicit-ns options are all splitkv kernels within ~2us of each other; the only fast option (single-pass, ~13us/call) is not bit-identical. The recoverable gain is ~5-10us/step average (below the ~40us noise) and ~0.04ms on ITL p99 (partial closure of the 0.09ms gap), not worth the fragility.
+- Worth retrying? NO unless a later flash-attn version changes the splitkv overhead structure.
 
 ## Backlog
 
