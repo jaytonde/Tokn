@@ -17,6 +17,7 @@
 | 9 | merge q_norm+k_norm into one fused QKNorm call | 459.39 | 13.28 | 3.99 | 1.003x |
 | 10 | cache padded block tables + CPU slot computation in prepare_decode | 459.05 | 13.00 | 3.82 | 1.003x |
 | 11 | fuse rotary cos/sin cache lookup into RoPE kernel | 459.58 | 11.15 | 3.78 | 1.003x |
+| 12 | QKNorm reads strided q/k from qkv output (drop 56 copy kernels) | 459.07 | 9.27 | 3.64 | 1.003x |
 
 ## Experiments tried
 
@@ -35,6 +36,7 @@
 | 17 | cache padded block tables + CPU slot computation in prepare_decode | sync | KEPT | ~0 (TPOT -4.3%) | prepare_decode was 0.46ms/step (11% of step, serialized): per-seq torch.full+cat block padding (constant per seq, rebuilt every step) + GPU slot arithmetic. Caching padded rows + computing slots on CPU from block_table_ids (no GPU ops, no sync) -> 0.12ms. TPOT 3.99->3.82 |
 | 18 | fuse rotary cos/sin cache lookup into RoPE kernel | kernel | KEPT | ~0 (TPOT -1%, TTFT -14%) | decode is per-kernel-cost bound (~650 kernels x ~5us); the cos/sin indexSelect gather was 1 kernel/layer. Fused lookup by position inside the Triton RoPE kernel -> 28 fewer kernels/step. TPOT 3.82->3.78, TTFT 13.0->11.2 |
 | 19 | (investigation) benchmark tail analysis | server | - | - | debug/tail_analysis.py: last arrival is at 210.37s (Poisson delays with seed=0 sum to 210s, not 200s), last request drains in 0.92s. Elapsed 211.3s = arrival span + drain. Throughput ceiling ~460.7 tok/s; tokn at 459.6 is 99.8% of it. No throughput headroom left; TPOT/ITL are the remaining metrics |
+| 20 | QKNorm reads strided q/k from qkv output directly (no reshape copy) | kernel | KEPT | ~0 (TPOT -4%, TTFT -16%) | the decode graph had 59 direct_copy elementwise kernels/step (~250us profiler). Root cause: q/k are strided views of the qkv GEMM output (dim-0 stride 4096), so QKNorm's q.reshape(-1,hd) forced a copy per q and k (2/layer = 56). Rewrote qk_convert_kernel to compute strided offsets (b*stride + h*cols) -> no copy, bit-identical. Copy kernels 59->3, decode_time 3330->3184us. TPOT 3.78->3.64, TTFT 11.2->9.3 |
 
 ## Details
 
@@ -202,6 +204,19 @@
 - Gap to vLLM now: throughput 1.004x, TPOT 1.19x (was 1.20x), TTFT 0.62x
 - Outcome: KEPT
 - Why it worked: the gather read the same bf16 cache values the kernel now reads directly; the fused kernel is bit-identical (same values, same fp32 math). Removing 28 kernels from a per-kernel-cost-bound graph is a direct win.
+- Worth retrying? NO (done).
+
+## [20] 2026-10-10 08:40  QKNorm reads strided q/k from qkv output (drop 56 copy kernels) (KEPT)
+- Hypothesis and expected gain: kernel-count profile showed 59 direct_copy elementwise kernels/step (~250us profiler, ~6% of decode). If located and removed, ~150-200us/step saved. The decode graph is per-kernel-cost bound, so every kernel removed is ~4-5us.
+- Profile evidence: copy kernels 59/step at 4.3us each = 254us (profiler). Isolating each layer component in a graph: attention/GEMMs/norms/rotary all had 0 copies; qk_norm had 2 copies/layer. Root cause: q/k are strided views of the qkv GEMM output (qkv is (bs,4096) contiguous; q=qkv[:,:2048].view(-1,16,128) has dim-0 stride 4096, not 2048), so QKNorm's q.reshape(-1,hd) made a full copy per tensor. 2 copies/layer x 28 = 56.
+- Related earlier entries: [15] (QKNorm merge - which introduced the reshape).
+- Change: layers/layernorm.py - qk_convert_kernel now takes q_heads/k_heads/q_stride/k_stride and computes offsets b*stride + h*cols; QKNorm.forward passes the strided q/k directly (no reshape). commit 5bad8e0.
+- Correctness: PASS - strided-input QKNorm bit-identical to old contiguous path (bs=1,5, random weights); bs=1 graph 0/37 vs reference; batched run1 vs run2 0/37. Copy kernels 59->3 (remaining 3 are the graph-vars fills).
+- Benchmark before (exp 18): 459.54/459.62 tok/s, TTFT 9.90/12.40, TPOT 3.77/3.78, ITL 3.77/3.78
+- Benchmark after (2 runs): 459.28/458.85 tok/s, TTFT 9.28/9.25 (p99 194), TPOT 3.64/3.63 (p99 3.86/3.87), ITL 3.64/3.64
+- Gap to vLLM now: throughput 1.003x, TPOT 1.14x (was 1.19x), TTFT 0.52x
+- Outcome: KEPT
+- Why it worked: qkv.split produces strided views; the old reshape paid a copy every step to make them contiguous for the norm, even though the norm kernel only needs per-row contiguous reads. Computing the strided offsets in Triton reads the same values with no copy.
 - Worth retrying? NO (done).
 
 ## Backlog
