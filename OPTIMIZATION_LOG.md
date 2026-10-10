@@ -78,6 +78,9 @@
 | 46 | batch queued prefills to raise prefill M | scheduler | ABANDONED | - | precluded by [45]: larger M slower + non-identical; scheduler already batches multi-seq prefills when several wait; TTFT p99 tail is admission-bound burst queueing, not prefill-M. |
 | 47 | in-graph greedy argmax: capture argmax as the LAST decode-graph op writing tbuf_tok, drop the per-step torch.argmax dispatch + the token H2D (GPU->CPU->GPU round-trip) | sync | KEPT | TPOT -4% (3.19->3.15), TTFT p99 -12% (~80->72) | the decode step did argmax (GPU kernel, on stream) then tolist (D2H) then postprocess, then the NEXT step H2D'd the token back into tbuf_tok (22us) + re-dispatched torch.argmax (17-29us). Capturing argmax in-graph costs no GPU time (kernel already on the stream) and removes both CPU costs; the engine reads tokens from tbuf_tok after the wait. Gates: bs=1 0/37, run_loop 0/37. 2 full runs: TPOT 3.15/3.15, TTFT 6.84/6.72 (p99 71.7/72.5), throughput 459.43/459.71 (ceiling). |
 | 48 | Triton GEMV to replace the o/down gemvx (23% of bs=1 decode) | kernel | REVERTED (no win) | 0 | debug/gemv_triton.py + gemv_tune.py: cuBLAS's gemvx order IS reproducible - a Triton sequential/chunk-tree GEMV is bit-identical (maxd=0) for EVERY BLOCK_N/BLOCK_K config (32..256 chunks), so the 2048-dot-product has slack. BUT every Triton config is ~2x SLOWER (30us vs 15.8us F.linear): Triton's (BLOCK_N,BLOCK_K) tile load + dispatch can't beat cuBLAS's 235GB/s GEMV on this shape, and more programs (small BLOCK_N) hit poor coalescing (matrix-vector). No config beat F.linear. |
+| 49 | extend use_fast_flash (num_splits=1) above ctx=256 to cut the splitkv penalty at ctx 257-369 | kernel | REVERTED (unsafe) | 0 | debug/splitkv_threshold.py: with RANDOM cache data, ns=1 vs ns=0 diverges (max|d|~1e-3, ndiff 225-500) at EVERY seqlen 250-400 - the bit-identity of single-pass vs splitkv is DATA-DEPENDENT (exp 14's <=256 bit_eq used real structured KV). So there is NO safe threshold above 256: benchmark contexts 257-369 would flip tokens undetected by the gate (whose prompts are short (48 tok) or long (474)). Confirms exp 32's conclusion. The ITL p99 gap (3.48 vs vLLM 3.39) from splitkv steps is blocked. |
+| 50 | submission-path tokenization cost on the event loop | server | NOT A LEVER | 0 | debug/tokenizer_cost.py: apply_chat_template+tokenizer ~0.3ms/request mean, 0.12s total event-loop blocking over 400 requests (0.06% of 210s). Negligible. |
+| 51 | reuse a persistent CUDA event for the decode GPU-wait poll (drop per-step torch.cuda.Event() create, ~12us/step) | sync | REVERTED (neutral) | 0 | two 400-prompt runs TPOT 3.16/3.15, ITL p99 3.69/3.50 vs exp 47's 3.15/3.15, 3.48/3.48 - neutral (one run's 3.69 ITL p99 is burst noise). Saving below the ~40us noise. Reverted (git checkout src/engine.py) to keep the clean exp-47 state. |
 
 ## Details
 
@@ -572,6 +575,37 @@
 - Outcome: REVERTED (no win)
 - Why it failed: Triton GEMV is inherently memory-pattern-poor for row-major matrix-vector products; cuBLAS's gemvx is already at ~235GB/s (3.5x floor is inherent to the GEMV access pattern, not a cuBLAS deficiency). No bit-identity-safe faster GEMV exists on this GPU.
 - Worth retrying? NO. The gemvx cost is inherent; the only escape would be restructuring the model math (e.g. keeping o/down in a larger batched GEMM), which is not bit-identity-safe.
+
+## [49] 2026-10-10 19:30  Extend use_fast_flash above ctx=256 (REVERTED - unsafe, data-dependent)
+- Hypothesis and expected gain: the ITL p99 gap to vLLM (3.48 vs 3.39) is the slowest decode steps (high bs + ctx>256 splitkv flash, ~400us penalty at bs=5). If num_splits=1 were bit-identical at ctx 257-369 (the benchmark range), raising the use_fast_flash threshold would cut the splitkv penalty for a slice of steps.
+- Profile evidence: debug/splitkv_threshold.py (real cache layout, random KV): ns=1 vs ns=0 diverges at EVERY seqlen 250..400 (max|d| ~9.8e-4, 225-500 of 2048 elements differ). This CONTRADICTS exp 14's <=256 bit_eq finding for REAL model data -> the ns1/ns0 identity is DATA-DEPENDENT (structured real KV rounds identically at <=256 in exp 14's test, random KV does not even at 250).
+- Related earlier entries: [14] (hybrid graphs, <=256 safe with real data), [32] (forced single-pass FAILED gate 4/37).
+- Change: NONE. Investigation only.
+- Correctness: NOT REACHED (no keeper). Even if a threshold test passed on the gate's data, the benchmark's ctx 257-369 is NOT covered by the gate (48-token gate prompts vs 474-token prefix prompts), so a data-dependent divergence there would flip benchmark tokens undetected. The 256 threshold stays.
+- Outcome: REVERTED (unsafe)
+- Why it failed: the ns=1 vs ns=0 flash kernels are numerically DIFFERENT (different softmax/reduction schedules); whether they agree for a given (cache, query) depends on the data's rounding. Real structured KV at <=256 happens to agree (exp 14); random KV does not. Extending the threshold risks silent token flips in the benchmark's 257-369 range.
+- Worth retrying? NO. The splitkv penalty at ctx>256 is fundamental; the ITL p99 gap is blocked by the flash numerics.
+
+## [50] 2026-10-10 19:45  Submission-path tokenization cost on the event loop (INVESTIGATION)
+- Context: add_async_request runs apply_chat_template + tokenizer synchronously on the asyncio event loop (submission coroutine), which could block the run_loop's postprocess and inflate TPOT/ITL for the affected steps. Measuring the actual cost to decide if it's a lever.
+- Outcome: see Details entry - measured, decided.
+
+## [50] 2026-10-10 19:45  Submission-path tokenization cost (INVESTIGATION - not a lever)
+- Context: add_async_request runs apply_chat_template + tokenizer synchronously on the asyncio event loop, which could block the run_loop's step postprocess and inflate TPOT/ITL for affected steps.
+- Profile evidence: debug/tokenizer_cost.py (real 400 questions): template 114.7us mean, tokenizer 175.9us mean, tolist 7.7us -> TOTAL 298.3us mean (p50 203.7us, p99 547.4us) per request. Over 400 requests = 0.12s of event-loop blocking out of 210s.
+- Outcome: NOT a lever. 0.12s total blocking is negligible; per-request blocking (<0.55ms) overlaps the ~3ms GPU wait so it delays a step postprocess only in rare overlaps, and the effect is <1% of steps by <0.5ms. No change.
+
+## [51] 2026-10-10 19:50  Reuse persistent CUDA event for the GPU-wait poll (REVERTED - neutral)
+- Hypothesis and expected gain: the decode step creates a fresh torch.cuda.Event() every step (~12us driver create call on the exposed CPU path, splitprof "record" ~20us). Reusing one event is safe (every step fully waits before the next record) and should save ~10-12us/step.
+- Profile evidence: splitprof "record" phase ~20us (incl. reset_context + Event() + record).
+- Related earlier entries: [35] (noted "a fresh torch.cuda.Event() each step is ~1us, not worth pooling" - that was before the busy-poll [38] changed the balance; the splitprof record phase is ~20us now).
+- Change: src/engine.py - self._ev = torch.cuda.Event() in __init__, reused in _step_split. REVERTED (git checkout).
+- Correctness: PASS - bs=1 graph 0/37 (CPU-only change).
+- Benchmark before (exp 47): 459.43/459.71 tok/s, TTFT 6.84/6.72 (p99 71.7/72.5), TPOT 3.15/3.15, ITL 3.16/3.16 (p99 3.48/3.48)
+- Benchmark after (2 runs): 459.75/459.70 tok/s, TTFT 6.77/6.66 (p99 70.3/72.0), TPOT 3.16/3.15, ITL 3.16/3.15 (p99 3.69/3.50)
+- Outcome: REVERTED (neutral - no measurable gain, one ITL-p99 outlier run 3.69)
+- Why it failed: the ~10us/step saving is below the ~40us benchmark noise; TPOT 3.16/3.15 is identical to exp 47's 3.15/3.15. Reverted to keep the tree at the clean exp-47 state per the neutral-change discipline.
+- Worth retrying? NO - below noise.
 
 ## Backlog
 
