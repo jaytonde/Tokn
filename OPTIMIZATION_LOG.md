@@ -18,6 +18,7 @@
 | 10 | cache padded block tables + CPU slot computation in prepare_decode | 459.05 | 13.00 | 3.82 | 1.003x |
 | 11 | fuse rotary cos/sin cache lookup into RoPE kernel | 459.58 | 11.15 | 3.78 | 1.003x |
 | 12 | QKNorm reads strided q/k from qkv output (drop 56 copy kernels) | 459.07 | 9.27 | 3.64 | 1.003x |
+| 13 | merge q+k rotary into one kernel launch | 460.10 | 8.77 | 3.62 | 1.005x |
 
 ## Experiments tried
 
@@ -37,6 +38,7 @@
 | 18 | fuse rotary cos/sin cache lookup into RoPE kernel | kernel | KEPT | ~0 (TPOT -1%, TTFT -14%) | decode is per-kernel-cost bound (~650 kernels x ~5us); the cos/sin indexSelect gather was 1 kernel/layer. Fused lookup by position inside the Triton RoPE kernel -> 28 fewer kernels/step. TPOT 3.82->3.78, TTFT 13.0->11.2 |
 | 19 | (investigation) benchmark tail analysis | server | - | - | debug/tail_analysis.py: last arrival is at 210.37s (Poisson delays with seed=0 sum to 210s, not 200s), last request drains in 0.92s. Elapsed 211.3s = arrival span + drain. Throughput ceiling ~460.7 tok/s; tokn at 459.6 is 99.8% of it. No throughput headroom left; TPOT/ITL are the remaining metrics |
 | 20 | QKNorm reads strided q/k from qkv output directly (no reshape copy) | kernel | KEPT | ~0 (TPOT -4%, TTFT -16%) | the decode graph had 59 direct_copy elementwise kernels/step (~250us profiler). Root cause: q/k are strided views of the qkv GEMM output (dim-0 stride 4096), so QKNorm's q.reshape(-1,hd) forced a copy per q and k (2/layer = 56). Rewrote qk_convert_kernel to compute strided offsets (b*stride + h*cols) -> no copy, bit-identical. Copy kernels 59->3, decode_time 3330->3184us. TPOT 3.78->3.64, TTFT 11.2->9.3 |
+| 21 | merge q+k rotary into one kernel launch | kernel | KEPT | ~0 (TPOT -0.8%, TTFT -11%) | rotary was 2 kernels/layer (q and k separately) = 56/step; merged into one launch mapping head -> q or k tensor (same cos/sin lookup, same math) -> 28 kernels/step. Bit-identical. decode_time 3184->3146us. TPOT 3.64->3.62, TTFT 9.3->8.8. Throughput 460.1 (1.005x vLLM) |
 
 ## Details
 
@@ -217,6 +219,19 @@
 - Gap to vLLM now: throughput 1.003x, TPOT 1.14x (was 1.19x), TTFT 0.52x
 - Outcome: KEPT
 - Why it worked: qkv.split produces strided views; the old reshape paid a copy every step to make them contiguous for the norm, even though the norm kernel only needs per-row contiguous reads. Computing the strided offsets in Triton reads the same values with no copy.
+- Worth retrying? NO (done).
+
+## [21] 2026-10-10 09:00  Merge q+k rotary into one kernel launch (KEPT)
+- Hypothesis and expected gain: the decode graph is per-kernel-cost bound (~587 kernels x ~3-5us). Rotary ran 2 kernels/layer (q and k) = 56/step. A single merged launch (program h in [0, q_heads+k_heads], head<h_q -> q else k) halves that to 28 -> ~28 x 3us = ~84us/step.
+- Profile evidence: kernel categories: rotary 56 kernels, 169us profiler (3us each). decode_time 3184us (exp 20) -> 3146us = -38us/step (kernel was cheaper than the rough estimate).
+- Related earlier entries: [2], [18] (fused rotary), [15]/[20] (kernel-count reductions).
+- Change: layers/rotary_embedding.py - rotary_emb_merged_kernel handles q and k in one launch (same cos/sin cache lookup by position, branches on head index); RotaryEmbedding.forward calls it. commit 6417ac1.
+- Correctness: PASS - merged vs old (gather) and vs exp-18 fused, bit-identical at bs=1 and bs=5; bs=1 graph 0/37 vs reference; batched run1 vs run2 0/37.
+- Benchmark before (exp 20): 459.28/458.85 tok/s, TTFT 9.28/9.25, TPOT 3.64/3.63, ITL 3.64/3.64
+- Benchmark after (2 runs): 459.94/460.26 tok/s, TTFT 7.95/9.59 (p99 127/208), TPOT 3.61/3.62 (p99 3.88/3.87), ITL 3.61/3.62
+- Gap to vLLM now: throughput 1.005x, TPOT 1.14x, TTFT 0.49x
+- Outcome: KEPT
+- Why it worked: q and k rotary share the same positions -> identical cos/sin lookup; computing both in one launch removes a duplicate lookup+launch with no numeric change.
 - Worth retrying? NO (done).
 
 ## Backlog
