@@ -59,9 +59,9 @@ class Attention(nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
-        if k_cache.numel() and v_cache.numel():
-            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
         if context.is_prefill:
+            if k_cache.numel() and v_cache.numel():
+                store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
             o = flash_attn_varlen_func(q, k, v,
@@ -69,6 +69,10 @@ class Attention(nn.Module):
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
+            if not context.kv_stored and k_cache.numel() and v_cache.numel():
+                # bs=1 separate path: the fused scale+rotate kernel did not
+                # run, so store the new K/V here as before.
+                store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
             # use_fast_flash -> num_splits=1 (single-pass kernel; bit-identical
             # to the splitkv path for seqlen <= 256 and ~7us/call faster).
             # The context flag is set by Run.prepare_decode from the max

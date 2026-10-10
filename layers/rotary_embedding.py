@@ -13,19 +13,23 @@ def scale_rotate_kernel(
     cache_ptr,         # cos_sin_cache (max_pos, 1, 2*half_dim)
     pos_ptr,           # (num_tokens,) long
     outq_ptr, outk_ptr,  # bf16 outputs
+    k_cache_ptr, v_cache_ptr, v_ptr, slot_mapping_ptr,
     num_q_heads,
     num_k_heads,
     n_q_rows,          # num_tokens * num_q_heads
     cache_stride,
+    num_kv_heads,
+    v_stride,          # stride(0) of v
     half_dim: tl.constexpr,
     eps,
 ):
-    """Fused RMSNorm-scale + RoPE for q and k in ONE launch.
+    """Fused RMSNorm-scale + RoPE + KV-cache store for q and k in ONE launch.
 
-    For each (token, head): scale = round_bf16(xf*rsqrt(var+eps)) * w (per
-    head_dim), then rotate with cos/sin from the position cache. Bit-identical
-    to the old (qk_scale_kernel then rotary_emb_merged_kernel): same bf16
-    roundings, same fp32 rotary math."""
+    For each (token, head): scale = round_bf16(xf*rsqrt(var+eps)) * w, then
+    rotate with cos/sin from the position cache. For k heads it ALSO writes the
+    rotated k and the corresponding v into the paged KV cache at the token's
+    slot, replacing the separate store_kvcache kernel (bit-identical: same
+    values, same slot, same per-head offsets)."""
     token = tl.program_id(0)
     h = tl.program_id(1)
     lo = tl.arange(0, half_dim)
@@ -59,6 +63,19 @@ def scale_rotate_kernel(
     y2 = s2.to(tl.float32) * cos + s1.to(tl.float32) * sin
     tl.store(out_ptr + out_base + lo, y1.to(out_ptr.dtype.element_ty))
     tl.store(out_ptr + out_base + half_dim + lo, y2.to(out_ptr.dtype.element_ty))
+
+    if h >= num_q_heads:
+        # k heads: also write rotated k and v into the paged KV cache.
+        hh = h - num_q_heads
+        slot = tl.load(slot_mapping_ptr + token)
+        if slot != -1:
+            cache_off = slot * (num_kv_heads * 2 * half_dim) + hh * 2 * half_dim
+            tl.store(k_cache_ptr + cache_off + lo, y1.to(out_ptr.dtype.element_ty))
+            tl.store(k_cache_ptr + cache_off + half_dim + lo, y2.to(out_ptr.dtype.element_ty))
+            v1 = tl.load(v_ptr + token * v_stride + hh * 2 * half_dim + lo)
+            v2 = tl.load(v_ptr + token * v_stride + hh * 2 * half_dim + half_dim + lo)
+            tl.store(v_cache_ptr + cache_off + lo, v1)
+            tl.store(v_cache_ptr + cache_off + half_dim + lo, v2)
 
 
 @triton.jit
@@ -256,10 +273,17 @@ class RotaryEmbedding(nn.Module):
                      w_k: torch.Tensor,
                      q_shape,
                      k_shape,
-                     eps: float) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fused RMSNorm-scale + RoPE for q and k (from QKNorm.prepare xf/var).
+                     eps: float,
+                     v: torch.Tensor,
+                     k_cache: torch.Tensor,
+                     v_cache: torch.Tensor,
+                     slot_mapping: torch.Tensor,
+                     num_kv_heads: int,
+                     v_stride: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused RMSNorm-scale + RoPE + paged-KV store for q and k.
 
-        Bit-identical to qk_scale then rotary, in one kernel launch."""
+        Bit-identical to qk_scale then rotary then store_kvcache, in one
+        kernel launch."""
         num_tokens = q_shape[0]
         num_q_heads = q_shape[1]
         num_k_heads = k_shape[1]
@@ -269,8 +293,9 @@ class RotaryEmbedding(nn.Module):
         outk = torch.empty(k_shape, dtype=torch.bfloat16, device=xf.device)
         scale_rotate_kernel[(num_tokens, num_q_heads + num_k_heads)](
             xf, var, w_q, w_k, self.cos_sin_cache, positions, outq, outk,
+            k_cache, v_cache, v, slot_mapping,
             num_q_heads, num_k_heads, n_q_rows, self.cos_sin_cache.stride(0),
-            half_dim, eps,
+            num_kv_heads, v_stride, half_dim, eps,
         )
         return outq, outk
 

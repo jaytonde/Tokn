@@ -10,6 +10,7 @@ from layers.layernorm import RMSNorm, QKNorm
 from layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from layers.rotary_embedding import get_rope
 from layers.embed_head import VocabParallelEmbedding, ParallelLMHead
+from utils.context import get_context
 
 
 
@@ -92,15 +93,22 @@ class Qwen3Attention(nn.Module):
             nk = q.shape[0] * k.shape[1]
             if nk < 16:
                 # bs=1: separate norm path (torch reduce config differs merged)
+                ctx = get_context()
+                ctx.kv_stored = False
                 q, k = self.qk_norm(q, k)
                 q, k = self.rotary_emb(positions, q, k)
             else:
-                # Fused scale+rotary: QKNorm emits fp32 xf/var, the rotary
-                # kernel does the RMSNorm scale and RoPE in one launch.
+                # Fused scale+rotary+KV-store: QKNorm emits fp32 xf/var, the
+                # rotary kernel does the RMSNorm scale, RoPE and the paged-cache
+                # write (rotated k + v) in one launch.
+                ctx = get_context()
+                ctx.kv_stored = True
                 xf, var = self.qk_norm.prepare(q, k)
                 q, k = self.rotary_emb.scale_rotate(
                     positions, xf, var, self.qk_norm.w_q, self.qk_norm.w_k,
                     q.shape, k.shape, self.qk_norm.eps,
+                    v, self.attn.k_cache, self.attn.v_cache, ctx.slot_mapping,
+                    self.num_kv_heads, v.stride(0),
                 )
         else:
             q, k = self.rotary_emb(positions, q, k)

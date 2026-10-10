@@ -17,6 +17,9 @@ class InferenceContext:
     # kernel, bit-identical for seqlen <= 256, ~7us/call faster); False ->
     # splitkv path (reference behavior for seqlen > 256).
     use_fast_flash: bool = False
+    # Decode only: True when the fused scale+rotate kernel already wrote the
+    # current K/V into the paged cache, so Attention skips store_kvcache.
+    kv_stored: bool = False
 
 
 _CONTEXT: Optional[InferenceContext] = None
@@ -33,6 +36,7 @@ def set_context(
     context_lens: Optional[Any] = None,
     block_tables: Optional[Any] = None,
     use_fast_flash: bool = False,
+    kv_stored: bool = False,
 ) -> None:
     global _CONTEXT
     _CONTEXT = InferenceContext(
@@ -45,6 +49,7 @@ def set_context(
         context_lens=context_lens,
         block_tables=block_tables,
         use_fast_flash=use_fast_flash,
+        kv_stored=kv_stored,
     )
 
 
