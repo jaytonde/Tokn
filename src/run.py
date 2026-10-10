@@ -539,38 +539,45 @@ class Run:
         return input_ids, positions
 
     def prepare_decode(self, seqs):
-        input_ids = []
-        positions = []
-        context_lens = []
+        rows = []
         block_tables = []
-        slots = []
         max_ctx = 0
 
         for seq in seqs:
             pos = len(seq.token_ids) - 1
 
-            input_ids.append(seq.last_token)
-            positions.append(pos)
-            context_lens.append(len(seq.token_ids))
-            max_ctx = max(max_ctx, len(seq.token_ids))
-
             # Slots computed on CPU from the (CPU) block_table_ids list: the
             # block for position p is block_table_ids[p // block_size]. This
             # avoids the per-step GPU integer ops and needs no .item() syncs.
-            slots.append(
+            slot = (
                 seq.block_table_ids[pos // self.block_size] * self.block_size
                 + pos % self.block_size
             )
+            rows.append([seq.last_token, pos, len(seq.token_ids), slot])
+            max_ctx = max(max_ctx, len(seq.token_ids))
+
             block_tables.append(self._padded_bt_row(seq))
 
         device = torch.device(self.device)
-
-        input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
-        positions = torch.tensor(positions, dtype=torch.long, device=device)
-        context_lens = torch.tensor(context_lens, dtype=torch.int32, device=device)
-        slot_mapping = torch.tensor(slots, dtype=torch.int32, device=device)
-
         bt = torch.stack(block_tables, dim=0)  # (bs, max_num_blocks)
+
+        if self.enforce_eager:
+            # Eager mode: the model reads slot_mapping/context_lens directly
+            # (store_kvcache/flash), which need contiguous int32.
+            input_ids = torch.tensor([r[0] for r in rows], dtype=torch.long, device=device)
+            positions = torch.tensor([r[1] for r in rows], dtype=torch.long, device=device)
+            context_lens = torch.tensor([r[2] for r in rows], dtype=torch.int32, device=device)
+            slot_mapping = torch.tensor([r[3] for r in rows], dtype=torch.int32, device=device)
+        else:
+            # Graph mode: one (bs,4) int32 H2D; the strided column views are
+            # fine because run_model copies them into the contiguous graph
+            # buffers (casting int32->long for ids/positions). Saves 3 tensor
+            # constructions (~70us/step of exposed CPU).
+            t = torch.tensor(rows, dtype=torch.int32, device=device)
+            input_ids = t[:, 0]
+            positions = t[:, 1]
+            context_lens = t[:, 2]
+            slot_mapping = t[:, 3]
 
         set_context(
             is_prefill=False,
