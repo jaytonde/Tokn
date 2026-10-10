@@ -306,8 +306,18 @@ class Run:
                 # Warmup run (lazy allocs / autotune happen OUTSIDE the graph).
                 # Capture the full forward INCLUDING lm_head so the logits GEMM
                 # runs inside the graph instead of eagerly every decode step.
+                # The decode-input distribution (tbuf -> g_input/g_pos/g_ctx/
+                # g_slot/block_tables) is ALSO captured inside each graph, so
+                # run_model replays ONE graph instead of copy-graph + model
+                # graph (the copy ops are just 5 tiny kernels at the front of
+                # the graph, ~3us, and avoid a second ~10-15us graph launch).
                 outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
                 with torch.cuda.graph(graph, self.graph_pool):
+                    g_input[:bs] = tbuf[:bs, 0]
+                    g_pos[:bs] = tbuf[:bs, 1]
+                    g_ctx[:bs] = tbuf[:bs, 2]
+                    g_slot[:bs] = tbuf[:bs, 3]
+                    block_tables[:bs] = tbuf[:bs, 4:4 + max_num_blocks]
                     outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
 
                 if self.graph_pool is None:
@@ -354,16 +364,15 @@ class Run:
         gv      = self.graph_vars
 
         # prepare_decode already wrote the (bs, 4+max_num_blocks) int32 rows
-        # into gv["tbuf"] (one H2D). The copy-graph distributes them into the
-        # model's input buffers (g_input/g_pos/g_slot/g_ctx/block_tables) in a
-        # single replay, replacing the five per-step __setitem__ copies.
+        # into gv["tbuf"] (one H2D). The decode graph's first kernels
+        # distribute tbuf into the model's input buffers (g_input/g_pos/g_slot/
+        # g_ctx/block_tables), so run_model is a SINGLE graph replay. The
+        # use_bs != bs branch is dead with exact per-bs graphs (bs <= max_bs
+        # always matches); kept for safety with a larger fallback batch.
         if use_bs != bs:
-            # Only when bs does not exactly match a captured graph do we pad up
-            # to a larger shape; those padding rows need deterministic sentinels.
             gv["g_slot"].fill_(-1)          # padding rows write nowhere
             gv["g_ctx"].zero_()             # padding rows attend to nothing
             gv["block_tables"].fill_(-1)    # keep padding deterministic (-1)
-        self.copy_graph.replay()
         graph.replay()
 
         return gv["outputs"][:bs]
