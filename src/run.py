@@ -5,6 +5,7 @@ import os
 import asyncio
 import torch
 import torch.distributed as dist
+import numpy as np
 from dataclasses import dataclass
 from transformers  import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from huggingface_hub import snapshot_download
@@ -155,6 +156,17 @@ class Run:
         self.block_size = 256
         self.max_num_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
 
+        # Persistent PINNED CPU staging used ONLY by the speculative-prep path
+        # (exp 41): it H2D's the next step's state columns while the GPU is busy
+        # with the current step, so the copy MUST be truly async (pinned source
+        # + non_blocking). A pageable source here would make cudaMemcpy
+        # synchronous and block the loop until the GPU frees up (~2.8ms).
+        self._pin = torch.zeros(
+            self.config.max_num_seqs, 3 + self.max_num_blocks, dtype=torch.int32,
+            device="cpu", pin_memory=True,
+        )
+        self._pin_np = self._pin.numpy()
+
         num_layers = config.num_hidden_layers
         num_kv_heads = config.num_key_value_heads // self.world_size
 
@@ -251,12 +263,18 @@ class Run:
         device         = torch.device(self.device)
 
         # Static buffers — addresses are frozen for the lifetime of the graphs.
-        # The decode input (token, pos, ctx_len, slot, block-table row) is
-        # assembled on the CPU as one (bs, 4+max_num_blocks) int32 tensor and
-        # H2D'd into `tbuf`; a dedicated copy-graph distributes it into the
-        # model's static input buffers (g_input/g_pos/g_slot/g_ctx/btbuf) in
-        # ONE replay, so run_model does no per-step __setitem__ copies at all.
-        tbuf           = torch.zeros(max_bs, 4 + max_num_blocks, dtype=torch.int32, device=device)
+        # The decode input is split into TWO buffers so the per-step token
+        # write is CONTIGUOUS (a strided column write into a (bs,12) tbuf cost
+        # ~41us vs ~22us contiguous, exp 41):
+        #   tbuf_tok    : (max_bs,)      int32 - the next token id.
+        #   tbuf_state  : (max_bs, 3 + max_num_blocks) int32 - [pos, ctx_len,
+        #                 slot, block-table row]. The state columns depend only
+        #                 on the running set and token counts, so they can be
+        #                 speculatively written during the previous step's GPU
+        #                 wait (prepare_decode spec_next), and the next step
+        #                 only rewrites tbuf_tok.
+        tbuf_tok       = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        tbuf_state     = torch.zeros(max_bs, 3 + max_num_blocks, dtype=torch.int32, device=device)
         g_input        = torch.zeros(max_bs, dtype=torch.long,  device=device)
         g_pos          = torch.zeros(max_bs, dtype=torch.long,  device=device)
         g_slot         = torch.zeros(max_bs, dtype=torch.int32, device=device)
@@ -264,15 +282,16 @@ class Run:
         block_tables   = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device=device)
         outputs        = torch.zeros(max_bs, self.hf_config.vocab_size, dtype=self.dtype, device=device)
 
-        # copy-graph: tbuf -> the model's input buffers (casts int32->long for
-        # ids/positions; exact, so bit-identical to the old __setitem__ copies).
+        # copy-graph: tbuf_tok/tbuf_state -> the model's input buffers (casts
+        # int32->long for ids/positions; exact, so bit-identical to the old
+        # __setitem__ copies).
         cg = torch.cuda.CUDAGraph()
         with torch.cuda.graph(cg, self.graph_pool):
-            g_input[:] = tbuf[:, 0]
-            g_pos[:] = tbuf[:, 1]
-            g_ctx[:] = tbuf[:, 2]
-            g_slot[:] = tbuf[:, 3]
-            block_tables[:] = tbuf[:, 4:4 + max_num_blocks]
+            g_input[:] = tbuf_tok[:]
+            g_pos[:] = tbuf_state[:, 0]
+            g_ctx[:] = tbuf_state[:, 1]
+            g_slot[:] = tbuf_state[:, 2]
+            block_tables[:] = tbuf_state[:, 3:3 + max_num_blocks]
         if self.graph_pool is None:
             self.graph_pool = cg.pool()
         self.copy_graph = cg
@@ -313,11 +332,11 @@ class Run:
                 # the graph, ~3us, and avoid a second ~10-15us graph launch).
                 outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
                 with torch.cuda.graph(graph, self.graph_pool):
-                    g_input[:bs] = tbuf[:bs, 0]
-                    g_pos[:bs] = tbuf[:bs, 1]
-                    g_ctx[:bs] = tbuf[:bs, 2]
-                    g_slot[:bs] = tbuf[:bs, 3]
-                    block_tables[:bs] = tbuf[:bs, 4:4 + max_num_blocks]
+                    g_input[:bs] = tbuf_tok[:bs]
+                    g_pos[:bs] = tbuf_state[:bs, 0]
+                    g_ctx[:bs] = tbuf_state[:bs, 1]
+                    g_slot[:bs] = tbuf_state[:bs, 2]
+                    block_tables[:bs] = tbuf_state[:bs, 3:3 + max_num_blocks]
                     outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
 
                 if self.graph_pool is None:
@@ -328,7 +347,8 @@ class Run:
                 reset_context()
 
         self.graph_vars = dict(
-            tbuf=tbuf,
+            tbuf_tok=tbuf_tok,
+            tbuf_state=tbuf_state,
             g_input=g_input,
             g_pos=g_pos,
             g_slot=g_slot,
@@ -363,12 +383,14 @@ class Run:
         graph   = pool[use_bs]
         gv      = self.graph_vars
 
-        # prepare_decode already wrote the (bs, 4+max_num_blocks) int32 rows
-        # into gv["tbuf"] (one H2D). The decode graph's first kernels
-        # distribute tbuf into the model's input buffers (g_input/g_pos/g_slot/
-        # g_ctx/block_tables), so run_model is a SINGLE graph replay. The
-        # use_bs != bs branch is dead with exact per-bs graphs (bs <= max_bs
-        # always matches); kept for safety with a larger fallback batch.
+        # prepare_decode already wrote the next tokens into gv["tbuf_tok"] and
+        # the state columns (pos/ctx_len/slot/block-table) into gv["tbuf_state"]
+        # (H2D; possibly split across the speculative-prep of the previous step,
+        # exp 41). The decode graph's first kernels distribute them into the
+        # model's input buffers (g_input/g_pos/g_slot/g_ctx/block_tables), so
+        # run_model is a SINGLE graph replay. The use_bs != bs branch is dead
+        # with exact per-bs graphs (bs <= max_bs always matches); kept for
+        # safety with a larger fallback batch.
         if use_bs != bs:
             gv["g_slot"].fill_(-1)          # padding rows write nowhere
             gv["g_ctx"].zero_()             # padding rows attend to nothing
@@ -594,8 +616,59 @@ class Run:
 
         return input_ids, positions
 
-    def prepare_decode(self, seqs):
-        rows = []
+    def prepare_decode(self, seqs, token_only=False, spec_next=False):
+        # token_only: the state columns (pos/ctx/slot/block-table) were already
+        # written into tbuf_state by the previous step's speculative prep
+        # (exp 41); only the token buffer needs the current last_token (a
+        # CONTIGUOUS write - ~22us vs ~41us for a strided column write).
+        # spec_next: build the NEXT step's state columns (pos=len, ctx=len+1,
+        # slot@pos=len) into tbuf_state - they depend only on the running set
+        # and current token counts, not on this step's tokens, so they can be
+        # pre-computed during the previous step's GPU wait (async pinned H2D).
+        if token_only:
+            # The state columns AND the inference context were already set by
+            # the previous step's speculative prep (spec_next, exp 41); only
+            # the token buffer needs the current last_token (contiguous write).
+            n = len(seqs)
+            gv = self.graph_vars
+            gv["tbuf_tok"][:n].copy_(
+                torch.tensor([s.last_token for s in seqs], dtype=torch.int32)
+            )
+            return gv["tbuf_tok"][:n], gv["tbuf_state"][:n, 0]
+
+        if spec_next:
+            state_rows = []
+            max_ctx = 0
+            for seq in seqs:
+                pos = len(seq.token_ids)          # position of the next token
+                slot = (
+                    seq.block_table_ids[pos // self.block_size] * self.block_size
+                    + pos % self.block_size
+                )
+                bt_ids = seq.block_table_ids[:self.max_num_blocks]
+                bt_pad = [-1] * (self.max_num_blocks - len(bt_ids))
+                state_rows.append([pos, len(seq.token_ids) + 1, slot] + bt_ids + bt_pad)
+                max_ctx = max(max_ctx, len(seq.token_ids) + 1)
+            gv = self.graph_vars
+            n = len(state_rows)
+            self._pin_np[:n] = np.array(state_rows, dtype=np.int32)
+            gv["tbuf_state"][:n].copy_(self._pin[:n], non_blocking=True)
+            # Set the inference context speculatively for the next step. This is
+            # only used if the fast path fires (running set unchanged), in which
+            # case max_ctx and the buffer views are exactly what a fresh prepare
+            # would produce; otherwise the full-prep path overwrites it.
+            set_context(
+                is_prefill=False,
+                slot_mapping=gv["g_slot"][:n],
+                context_lens=gv["g_ctx"][:n],
+                block_tables=gv["block_tables"][:n],
+                use_fast_flash=max_ctx <= self.block_size,
+            )
+            return max_ctx
+
+        # Full prepare: build both buffers (token + state for THIS step).
+        tokens = []
+        state_rows = []
         max_ctx = 0
 
         for seq in seqs:
@@ -612,37 +685,39 @@ class Run:
             # are pre-allocated at admission and never change during decode).
             bt_ids = seq.block_table_ids[:self.max_num_blocks]
             bt_pad = [-1] * (self.max_num_blocks - len(bt_ids))
-            rows.append([seq.last_token, pos, len(seq.token_ids), slot] + bt_ids + bt_pad)
+            tokens.append(seq.last_token)
+            state_rows.append([pos, len(seq.token_ids), slot] + bt_ids + bt_pad)
             max_ctx = max(max_ctx, len(seq.token_ids))
 
         device = self._device
+        gv = self.graph_vars
 
         if self.enforce_eager:
             # Eager mode: the model reads slot_mapping/context_lens directly
             # (store_kvcache/flash), which need contiguous int32.
-            input_ids = torch.tensor([r[0] for r in rows], dtype=torch.long, device=device)
-            positions = torch.tensor([r[1] for r in rows], dtype=torch.long, device=device)
-            context_lens = torch.tensor([r[2] for r in rows], dtype=torch.int32, device=device)
-            slot_mapping = torch.tensor([r[3] for r in rows], dtype=torch.int32, device=device)
+            input_ids = torch.tensor(tokens, dtype=torch.long, device=device)
+            positions = torch.tensor([r[0] for r in state_rows], dtype=torch.long, device=device)
+            context_lens = torch.tensor([r[1] for r in state_rows], dtype=torch.int32, device=device)
+            slot_mapping = torch.tensor([r[2] for r in state_rows], dtype=torch.int32, device=device)
             bt = torch.stack([self._padded_bt_row(seq) for seq in seqs], dim=0)
             input_ids_t, positions_t = input_ids, positions
         else:
-            # Graph mode: assemble the whole decode input (token, pos, ctx_len,
-            # slot, block-table row) into tbuf with ONE H2D; the copy-graph
-            # distributes it into the model's input buffers on replay. No
-            # torch.stack, no per-column copies on the CPU side.
-            gv = self.graph_vars
-            tbuf = gv["tbuf"]
-            tbuf[:len(rows)].copy_(torch.tensor(rows, dtype=torch.int32))
-            input_ids_t = tbuf[:len(rows), 0]
-            positions_t = tbuf[:len(rows), 1]
+            # Graph mode: write the token buffer (contiguous) and the state
+            # buffer (contiguous); the graph's copy front-ops distribute them
+            # into the model's input buffers on replay. No torch.stack, no
+            # per-column copies on the CPU side.
+            n = len(state_rows)
+            gv["tbuf_tok"][:n].copy_(torch.tensor(tokens, dtype=torch.int32))
+            gv["tbuf_state"][:n].copy_(torch.tensor(state_rows, dtype=torch.int32))
+            input_ids_t = gv["tbuf_tok"][:n]
+            positions_t = gv["tbuf_state"][:n, 0]
             # Point the context at the model's static (contiguous) buffers so
             # any eager fallback reads the values the copy-graph will produce.
-            input_ids = gv["g_input"][:len(rows)]
-            positions = gv["g_pos"][:len(rows)]
-            context_lens = gv["g_ctx"][:len(rows)]
-            slot_mapping = gv["g_slot"][:len(rows)]
-            bt = gv["block_tables"][:len(rows)]
+            input_ids = gv["g_input"][:n]
+            positions = gv["g_pos"][:n]
+            context_lens = gv["g_ctx"][:n]
+            slot_mapping = gv["g_slot"][:n]
+            bt = gv["block_tables"][:n]
 
         set_context(
             is_prefill=False,

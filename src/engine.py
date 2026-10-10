@@ -84,6 +84,12 @@ class Engine:
             block_manager=self.block_manager,
             device=self.device,
         )
+
+        # Speculative-prep state (exp 41): tuple of seq_ids for which
+        # Run.prepare_decode has already written the NEXT step's state columns
+        # (pos/ctx_len/slot/block-table) into tbuf during the previous step's
+        # GPU wait, so the next decode step only overwrites the token column.
+        self._spec_ids = None
  
     async def add_async_request(self, prompt: str, sampling_params: SamplingParams | None = None) -> int:
         if sampling_params is None:
@@ -266,10 +272,19 @@ class Engine:
             # Prefills may trigger lazy graph capture (~190ms); keep them off
             # the event loop. Prefills are rare (~1 per request vs ~256 decode
             # steps), so the full-step executor tax is negligible here.
+            self._spec_ids = None  # a prefill changes the running set
             return await loop.run_in_executor(None, self._step_with_seqs, seqs, True)
 
         with torch.inference_mode():
-            input_ids, positions = self.RUN.prepare_decode(seqs)
+            if self._spec_ids == tuple(s.seq_id for s in seqs):
+                # The previous step's GPU wait already wrote this step's state
+                # columns (pos/ctx/slot/block-table) into tbuf; only the token
+                # column changed since (the previous step's argmax). Overwrite
+                # just the token -> skips the ~45us row build + full H2D.
+                input_ids, positions = self.RUN.prepare_decode(seqs, token_only=True)
+            else:
+                self._spec_ids = None
+                input_ids, positions = self.RUN.prepare_decode(seqs)
             try:
                 logits = self.RUN.run_model(input_ids, positions, False)
             finally:
@@ -289,6 +304,21 @@ class Engine:
         # iteration keeps the loop free to service arrivals on time, so
         # throughput and TTFT are unaffected (unlike the fully-inline mode
         # which blocked on ev.synchronize and starved arrivals, exp 28).
+        # While waiting, speculatively prepare the NEXT decode step's state
+        # columns (exp 41): they depend only on the running set (unchanged
+        # between decode steps) and the current token counts, not on this
+        # step's tokens. If a seq finishes or a prefill lands, the seq-id
+        # comparison on the next step falls back to a full rebuild.
+        if not ev.query():
+            try:
+                with torch.inference_mode():
+                    self._spec_ids = tuple(s.seq_id for s in seqs)
+                    self.RUN.prepare_decode(seqs, spec_next=True)
+            except Exception:
+                self._spec_ids = None
+        else:
+            self._spec_ids = None
+
         while not ev.query():
             await asyncio.sleep(0)
 
