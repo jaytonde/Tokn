@@ -13,6 +13,10 @@ class InferenceContext:
     slot_mapping: Optional[Any] = None
     context_lens: Optional[Any] = None
     block_tables: Optional[Any] = None
+    # Decode only: True -> flash attention uses num_splits=1 (single-pass
+    # kernel, bit-identical for seqlen <= 256, ~7us/call faster); False ->
+    # splitkv path (reference behavior for seqlen > 256).
+    use_fast_flash: bool = False
 
 
 _CONTEXT: Optional[InferenceContext] = None
@@ -28,6 +32,7 @@ def set_context(
     slot_mapping: Optional[Any] = None,
     context_lens: Optional[Any] = None,
     block_tables: Optional[Any] = None,
+    use_fast_flash: bool = False,
 ) -> None:
     global _CONTEXT
     _CONTEXT = InferenceContext(
@@ -39,6 +44,7 @@ def set_context(
         slot_mapping=slot_mapping,
         context_lens=context_lens,
         block_tables=block_tables,
+        use_fast_flash=use_fast_flash,
     )
 
 

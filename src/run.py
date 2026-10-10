@@ -97,6 +97,7 @@ class Run:
 
         self.enforce_eager = self.config.enforce_eager
         self.graphs = {}
+        self.graphs_fast = {}
         self.graph_pool = None
         self.graph_bs = []
         self.graph_vars = {}
@@ -261,27 +262,37 @@ class Run:
 
 
         for bs in reversed(self.graph_bs):
-            graph = torch.cuda.CUDAGraph()
-            set_context(
-                is_prefill=False,
-                slot_mapping=slot_mapping[:bs],
-                context_lens=context_lens[:bs],
-                block_tables=block_tables[:bs]
-            )
+            # Capture TWO decode graphs per batch size:
+            #   self.graphs_fast[bs] : num_splits=1 flash kernel (single-pass).
+            #                          Bit-identical to the splitkv path for
+            #                          seqlen <= 256, ~7us/call faster.
+            #   self.graphs[bs]      : splitkv flash kernel (reference path,
+            #                          needed for seqlen > 256).
+            # Both share the same static buffers and graph pool; run_model
+            # picks one per step from the max context length (CPU-side flag).
+            for use_fast, dst in ((True, self.graphs_fast), (False, self.graphs)):
+                graph = torch.cuda.CUDAGraph()
+                set_context(
+                    is_prefill=False,
+                    slot_mapping=slot_mapping[:bs],
+                    context_lens=context_lens[:bs],
+                    block_tables=block_tables[:bs],
+                    use_fast_flash=use_fast,
+                )
 
-            # Warmup run (lazy allocs / autotune happen OUTSIDE the graph).
-            # Capture the full forward INCLUDING lm_head so the logits GEMM
-            # runs inside the graph instead of eagerly every decode step.
-            outputs[:bs] = self.custom_model(input_ids[:bs], positions[:bs])
-            with torch.cuda.graph(graph, self.graph_pool):
+                # Warmup run (lazy allocs / autotune happen OUTSIDE the graph).
+                # Capture the full forward INCLUDING lm_head so the logits GEMM
+                # runs inside the graph instead of eagerly every decode step.
                 outputs[:bs] = self.custom_model(input_ids[:bs], positions[:bs])
+                with torch.cuda.graph(graph, self.graph_pool):
+                    outputs[:bs] = self.custom_model(input_ids[:bs], positions[:bs])
 
-            if self.graph_pool is None:
-                self.graph_pool = graph.pool()
+                if self.graph_pool is None:
+                    self.graph_pool = graph.pool()
 
-            self.graphs[bs] = graph
-            torch.cuda.synchronize()
-            reset_context()
+                dst[bs] = graph
+                torch.cuda.synchronize()
+                reset_context()
 
         self.graph_vars = dict(
             input_ids=input_ids,
@@ -304,7 +315,8 @@ class Run:
 
         bs      = input_ids.size(0)
         context = get_context()
-        graph   = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+        pool    = self.graphs_fast if context.use_fast_flash else self.graphs
+        graph   = pool[next(x for x in self.graph_bs if x >= bs)]
         gv      = self.graph_vars
 
         gv["input_ids"][:bs] = input_ids
@@ -518,6 +530,7 @@ class Run:
         positions = []
         context_lens = []
         block_tables = []
+        max_ctx = 0
 
         for seq in seqs:
             pos = len(seq.token_ids) - 1
@@ -525,6 +538,7 @@ class Run:
             input_ids.append(seq.last_token)
             positions.append(pos)
             context_lens.append(len(seq.token_ids))
+            max_ctx = max(max_ctx, len(seq.token_ids))
 
             bt_row = seq.block_table[0]
             if bt_row.size(0) < self.max_num_blocks:
@@ -554,6 +568,7 @@ class Run:
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=bt,
+            use_fast_flash=max_ctx <= self.block_size,   # CPU-side, no sync
         )
 
         return input_ids, positions

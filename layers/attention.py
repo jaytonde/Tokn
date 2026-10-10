@@ -69,9 +69,14 @@ class Attention(nn.Module):
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
+            # use_fast_flash -> num_splits=1 (single-pass kernel; bit-identical
+            # to the splitkv path for seqlen <= 256 and ~7us/call faster).
+            # The context flag is set by Run.prepare_decode from the max
+            # context length; >256 falls back to the splitkv reference path.
+            num_splits = 1 if context.use_fast_flash else 0
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
                                         cache_seqlens=context.context_lens, block_table=context.block_tables, 
-                                        softmax_scale=self.scale, causal=True)
+                                        softmax_scale=self.scale, causal=True, num_splits=num_splits)
 
             o = o.squeeze(1)
             
