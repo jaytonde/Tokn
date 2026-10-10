@@ -1,0 +1,390 @@
+diff --git a/src/engine.py b/src/engine.py
+index 00e2c17..c69f7d8 100644
+--- a/src/engine.py
++++ b/src/engine.py
+@@ -211,22 +211,37 @@ class Engine:
+ 
+     @torch.inference_mode
+     def step(self):
+-        seqs, is_prefill = self.scheduler.schedule()
++        decode_seqs, prefill_seqs = self.scheduler.schedule()
+ 
+-        if not seqs:
++        if not decode_seqs and not prefill_seqs:
+             return []
+ 
+-        return self._step_with_seqs(seqs, is_prefill)
++        # Synchronous path (correctness gate, TOKN_STEP_MODE=inline/executor):
++        # run the decode batch then the prefill batch sequentially on the
++        # default stream. The combined scheduler result only matters for the
++        # split path, where the prefill overlaps the decode on the side stream.
++        finished = []
++        if decode_seqs:
++            finished += self._step_with_seqs(decode_seqs, False)
++        if prefill_seqs:
++            finished += self._step_with_seqs(prefill_seqs, True)
++        return finished
+ 
+     @torch.inference_mode
+     def _step_with_seqs(self, seqs, is_prefill):
+         """Full synchronous step given already-scheduled seqs: prepare, GPU
+         forward, argmax, postprocess, block hashing/deallocation."""
+         next_token_ids = self.RUN.call("run", seqs, is_prefill)
+-        
++        return self._postprocess(seqs, next_token_ids, is_prefill)
++
++    def _postprocess(self, seqs, token_ids, is_prefill):
++        """postprocess + block hashing + deallocation for one scheduled batch.
++        All scheduler/block-manager mutation runs on the event loop thread
++        (never inside the prefill executor future) so the combined decode+prefill
++        step has no cross-thread races."""
+         finished = self.scheduler.postprocess(
+             seqs=seqs,
+-            token_ids=next_token_ids,
++            token_ids=token_ids,
+             is_prefill=is_prefill,
+         )
+ 
+@@ -249,42 +264,68 @@ class Engine:
+ 
+         return finished
+ 
++    def _run_prefill_gpu(self, seqs):
++        """Run a prefill forward on the side stream (executor thread) and
++        return (seqs, next_token_ids). NO scheduler/block-manager mutation:
++        the caller postprocesses on the event loop. The side stream lets the
++        prefill's GPU work overlap the decode replay on the default stream.
++        Everything (input H2D + forward + argmax) runs inside the side-stream
++        context so the forward never reads input the default stream hasn't
++        finished copying."""
++        with torch.inference_mode():
++            with torch.cuda.stream(self.RUN.side_stream):
++                input_ids, positions = self.RUN.prepare_prefill(seqs)
++                try:
++                    logits = self.RUN.run_model(input_ids, positions, True)
++                finally:
++                    reset_context()
++                tokens_t = torch.argmax(logits, dim=-1)
++                ev = torch.cuda.Event()
++                ev.record()
++                ev.synchronize()
++                next_token_ids = tokens_t.tolist()
++        return seqs, next_token_ids
++
+     async def _step_split(self):
+         """Non-blocking step: enqueue decode GPU work on the event loop, then
+         await GPU completion without blocking the loop.
+ 
+-        The full run_in_executor step keeps arrivals on time but costs
+-        ~0.2ms/step of executor dispatch + GIL handoff (TPOT 3.46 vs 3.25 for
+-        inline). Here the decode enqueue phase (schedule/prepare/replay/argmax)
+-        runs directly on the event loop (~0.15ms, fine since arrivals are 2/s)
+-        and ONLY the GPU wait is delegated to the executor as a bare
+-        `event.synchronize()` (a C call, no GIL churn). PREFILL steps run the
+-        whole step in the executor: run_prefill can lazily CAPTURE a multi-seq
+-        CUDA graph (~190ms) on first use, which must not block the event loop
+-        (on-loop capture regressed TTFT p99 140->217ms in exp 28)."""
++        The scheduler may return BOTH a decode batch and a prefill batch in one
++        step. The decode replays on the default stream (event loop); the prefill
++        runs on the SIDE stream (executor thread) so its GPU work overlaps the
++        decode replay instead of stalling every running sequence for ~3.3ms.
++        Prefills can also lazily CAPTURE a multi-seq CUDA graph (~190ms) or run
++        eager (~40ms), so they must never run on the event loop."""
+         loop = asyncio.get_running_loop()
+-        seqs, is_prefill = self.scheduler.schedule()
++        decode_seqs, prefill_seqs = self.scheduler.schedule()
+ 
+-        if not seqs:
++        if not decode_seqs and not prefill_seqs:
+             return []
+ 
+-        if is_prefill:
+-            # Prefills may trigger lazy graph capture (~190ms); keep them off
+-            # the event loop. Prefills are rare (~1 per request vs ~256 decode
+-            # steps), so the full-step executor tax is negligible here.
+-            self._spec_ids = None  # a prefill changes the running set
+-            return await loop.run_in_executor(None, self._step_with_seqs, seqs, True)
++        prefill_fut = None
++        if prefill_seqs:
++            # A prefill changes the running set, so any speculative-prep state
++            # from a previous decode step is stale.
++            self._spec_ids = None
++            prefill_fut = loop.run_in_executor(None, self._run_prefill_gpu, prefill_seqs)
++
++        if not decode_seqs:
++            # Prefill-only step: wait for the prefill GPU, postprocess on loop.
++            while prefill_fut is not None and not prefill_fut.done():
++                await asyncio.sleep(0)
++            pseqs, ptokens = prefill_fut.result()
++            return self._postprocess(pseqs, ptokens, True)
+ 
+         with torch.inference_mode():
+-            if self._spec_ids == tuple(s.seq_id for s in seqs):
++            if self._spec_ids == tuple(s.seq_id for s in decode_seqs):
+                 # The previous step's GPU wait already wrote this step's state
+                 # columns (pos/ctx/slot/block-table) into tbuf; only the token
+                 # column changed since (the previous step's argmax). Overwrite
+                 # just the token -> skips the ~45us row build + full H2D.
+-                input_ids, positions = self.RUN.prepare_decode(seqs, token_only=True)
++                input_ids, positions = self.RUN.prepare_decode(decode_seqs, token_only=True)
+             else:
+                 self._spec_ids = None
+-                input_ids, positions = self.RUN.prepare_decode(seqs)
++                input_ids, positions = self.RUN.prepare_decode(decode_seqs)
+             try:
+                 logits = self.RUN.run_model(input_ids, positions, False)
+             finally:
+@@ -292,56 +333,38 @@ class Engine:
+             # Enqueue the argmax reduction now (reads the graph's output buffer
+             # on the same stream); only the completion wait is deferred.
+             tokens_t = torch.argmax(logits, dim=-1)
+-            ev = torch.cuda.Event()
+-            ev.record()
+-
+-        # Wait for the GPU without blocking the event loop. Poll the event
+-        # instead of delegating to the executor: run_in_executor(None,
+-        # ev.synchronize) costs ~0.1-0.4ms/step of thread-wakeup + future
+-        # round-trip (debug/execwait_probe.py: run_in_executor 1.62ms vs
+-        # busy-query 1.33ms p50 on the same 1.7ms GPU event). ev.query() is a
+-        # cheap non-blocking host call, and awaiting asyncio.sleep(0) each
+-        # iteration keeps the loop free to service arrivals on time, so
+-        # throughput and TTFT are unaffected (unlike the fully-inline mode
+-        # which blocked on ev.synchronize and starved arrivals, exp 28).
+-        # While waiting, speculatively prepare the NEXT decode step's state
+-        # columns (exp 41): they depend only on the running set (unchanged
+-        # between decode steps) and the current token counts, not on this
+-        # step's tokens. If a seq finishes or a prefill lands, the seq-id
+-        # comparison on the next step falls back to a full rebuild.
+-        if not ev.query():
++            ev_d = torch.cuda.Event()
++            ev_d.record()
++
++        # Speculatively prepare the NEXT decode step's state columns while the
++        # GPU is busy (exp 41). Skipped when a prefill is in this step: the
++        # prefill adds a sequence to the running set, so the next decode step's
++        # set will differ and a full rebuild happens anyway.
++        if prefill_fut is None and not ev_d.query():
+             try:
+                 with torch.inference_mode():
+-                    self._spec_ids = tuple(s.seq_id for s in seqs)
+-                    self.RUN.prepare_decode(seqs, spec_next=True)
++                    self._spec_ids = tuple(s.seq_id for s in decode_seqs)
++                    self.RUN.prepare_decode(decode_seqs, spec_next=True)
+             except Exception:
+                 self._spec_ids = None
+         else:
+             self._spec_ids = None
+ 
+-        while not ev.query():
++        # Wait for the decode GPU (and the prefill GPU if one is running) without
++        # blocking the event loop. Poll the event instead of delegating to the
++        # executor: run_in_executor(None, ev.synchronize) costs ~0.1-0.4ms/step.
++        # ev.query() is cheap and yielding with sleep(0) keeps the loop free to
++        # service arrivals on time.
++        while not ev_d.query() or (prefill_fut is not None and not prefill_fut.done()):
+             await asyncio.sleep(0)
+ 
+         with torch.inference_mode():
+             next_token_ids = tokens_t.tolist()
+-            finished = self.scheduler.postprocess(seqs, next_token_ids, False)
+-
+-        for seq in seqs:
+-            start_block = seq.num_hashed_blocks
+-            end_block = seq.num_cached_tokens // self.block_size
++        finished = self._postprocess(decode_seqs, next_token_ids, False)
+ 
+-            if end_block > start_block:
+-                self.block_manager.hash_completed_blocks(
+-                    token_ids=seq.token_ids,
+-                    block_table=seq.block_table_ids,
+-                    start_block=start_block,
+-                    end_block=end_block
+-                )
+-                seq.num_hashed_blocks = end_block
+-
+-        for seq in finished:
+-            self.block_manager.deallocate(seq.block_table_ids)
+-            self.RUN._padded_bt.pop(seq.seq_id, None)
++        if prefill_fut is not None:
++            pseqs, ptokens = prefill_fut.result()
++            finished += self._postprocess(pseqs, ptokens, True)
+ 
+         return finished
+ 
+diff --git a/src/run.py b/src/run.py
+index 08e67a1..e4d8827 100644
+--- a/src/run.py
++++ b/src/run.py
+@@ -122,8 +122,17 @@ class Run:
+         self.allocate_kv_cache()
+ 
+         if self.device.startswith("cuda") and not self.enforce_eager:
++            # Side stream for concurrent prefill: prefills (which would
++            # otherwise replace a decode step and stall every running
++            # sequence) are enqueued here so their GPU work overlaps the
++            # decode replay on the default stream. Distinct CUDA-graph pools
++            # (decode graph_pool vs prefill prefill_graph_pool) make the two
++            # replay streams safe to run concurrently.
++            self.side_stream = torch.cuda.Stream(device=self.device)
+             self.capture_cudagraph()
+             self.pre_capture_prefill_graphs()
++        else:
++            self.side_stream = None
+ 
+         torch.set_default_device("cpu")
+         torch.set_default_dtype(default_dtype)
+diff --git a/src/scheduler.py b/src/scheduler.py
+index 56df447..6c68d2e 100644
+--- a/src/scheduler.py
++++ b/src/scheduler.py
+@@ -27,32 +27,33 @@ class Scheduler:
+             self.waiting.append(seq)
+ 
+     def _schedule_unlocked(self):
+-        scheduled = []
+-
+-        # Decode active requests first to avoid starving in-flight generations.
+-        # Refill a freed slot immediately: if a running request just finished
+-        # (running below max) and requests are waiting, prefill now instead of
+-        # waiting out the prefill interval, keeping the decode batch full.
+-        should_decode_first = (
+-            self.running
+-            and (
+-                not self.waiting
+-                or (
+-                    len(self.running) >= self.max_num_seqs
+-                    and self.decode_steps_since_prefill < self.prefill_interval
+-                )
+-            )
++        """Returns (decode_seqs, prefill_seqs).
++
++        decode_seqs: running sequences to advance one token (stream 0).
++        prefill_seqs: waiting sequences to prefill (side stream, concurrent
++        with the decode replay). One of the two is empty unless a free decode
++        slot coincides with a waiting request, in which case BOTH run in the
++        same step (the prefill no longer stalls the running sequences).
++        """
++        decode_seqs = []
++        prefill_seqs = []
++
++        # A chunked prefill already admitted (block_table set, more prompt
++        # tokens to go) must keep being served even when all slots are full.
++        has_chunked = any(
++            s.block_table is not None and s.num_cached_tokens < s.num_tokens
++            for s in self.waiting
+         )
+ 
+-        # DECODE
+-        if should_decode_first:
+-            while self.running and len(scheduled) < self.max_num_seqs:
++        # Decode capacity full: drain the running sequences (admission refuses
++        # a new request anyway, so there is nothing to prefill concurrently).
++        if self.running and len(self.running) >= self.max_num_seqs and self.waiting and not has_chunked:
++            while self.running and len(decode_seqs) < self.max_num_seqs:
+                 seq = self.running.popleft()
+                 seq.num_scheduled_tokens = 1
+-                scheduled.append(seq)
+-
++                decode_seqs.append(seq)
+             self.decode_steps_since_prefill += 1
+-            return scheduled, False
++            return decode_seqs, prefill_seqs
+ 
+         # PREFILL
+         if self.waiting:
+@@ -67,7 +68,7 @@ class Scheduler:
+             admit_new = True
+ 
+             for seq in list(self.waiting):
+-                if len(scheduled) >= self.max_num_seqs:
++                if len(prefill_seqs) >= self.max_num_seqs:
+                     break
+ 
+                 if seq.block_table is None:
+@@ -110,25 +111,32 @@ class Scheduler:
+                 seq.status = "PREFILL"
+                 seq.num_scheduled_tokens = num_tokens
+ 
+-                scheduled.append(seq)
++                prefill_seqs.append(seq)
+                 num_batched_tokens += num_tokens
+ 
+-            if scheduled:
++            if prefill_seqs:
+                 self.decode_steps_since_prefill = 0
+-                return scheduled, True
++                # The prefill runs on the side stream (engine._step_split)
++                # concurrent with the decode replay, so the running sequences
++                # ALSO advance in this step instead of stalling for it.
++                while self.running and len(decode_seqs) < self.max_num_seqs:
++                    seq = self.running.popleft()
++                    seq.num_scheduled_tokens = 1
++                    decode_seqs.append(seq)
++                return decode_seqs, prefill_seqs
+ 
+         # Nothing could be prefilled (cache full or at max_num_seqs): keep
+         # decoding so running sequences finish and free their blocks.
+         if self.running:
+-            while self.running and len(scheduled) < self.max_num_seqs:
++            while self.running and len(decode_seqs) < self.max_num_seqs:
+                 seq = self.running.popleft()
+                 seq.num_scheduled_tokens = 1
+-                scheduled.append(seq)
++                decode_seqs.append(seq)
+ 
+             self.decode_steps_since_prefill += 1
+-            return scheduled, False
++            return decode_seqs, prefill_seqs
+ 
+-        return scheduled, False
++        return decode_seqs, prefill_seqs
+      
+     def _is_finished_unlocked(self):
+         return not self.waiting and not self.running
+diff --git a/utils/context.py b/utils/context.py
+index 578b7e1..926eaf2 100644
+--- a/utils/context.py
++++ b/utils/context.py
+@@ -1,4 +1,5 @@
+ 
++import threading
+ from dataclasses import dataclass
+ from typing import Any, Optional
+ 
+@@ -22,7 +23,7 @@ class InferenceContext:
+     kv_stored: bool = False
+ 
+ 
+-_CONTEXT: Optional[InferenceContext] = None
++_CONTEXT = threading.local()
+ 
+ 
+ def set_context(
+@@ -38,8 +39,7 @@ def set_context(
+     use_fast_flash: bool = False,
+     kv_stored: bool = False,
+ ) -> None:
+-    global _CONTEXT
+-    _CONTEXT = InferenceContext(
++    _CONTEXT.ctx = InferenceContext(
+         is_prefill=is_prefill,
+         cu_seqlens_q=cu_seqlens_q,
+         cu_seqlens_k=cu_seqlens_k,
+@@ -54,12 +54,12 @@ def set_context(
+ 
+ 
+ def get_context() -> InferenceContext:
+-    if _CONTEXT is None:
++    ctx = getattr(_CONTEXT, "ctx", None)
++    if ctx is None:
+         raise RuntimeError("Inference context is not set. Call set_context() before model forward.")
+-    return _CONTEXT
++    return ctx
+ 
+ 
+ def reset_context() -> None:
+-    global _CONTEXT
+-    _CONTEXT = None
++    _CONTEXT.ctx = None
+     
+\ No newline at end of file
