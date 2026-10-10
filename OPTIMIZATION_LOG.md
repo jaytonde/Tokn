@@ -21,6 +21,7 @@
 | 13 | merge q+k rotary into one kernel launch | 460.10 | 8.77 | 3.62 | 1.005x |
 | 14 | fuse qk-norm scale into rotary kernel (scale+rotate) | 460.13 | 9.39 | 3.57 | 1.005x |
 | 15 | single-tensor prepare_decode (one H2D in graph mode) | 459.51 | 8.93 | 3.52 | 1.004x |
+| 16 | drop redundant graph-vars fills (exact-bs graphs) | 460.10 | 9.39 | 3.51 | 1.005x |
 
 ## Experiments tried
 
@@ -44,6 +45,7 @@
 | 22 | skip graph-vars fills when batch is full (bs==max_num_seqs) | sync | REVERTED (no gain) | ~0 | bs=5 steps are rare in the benchmark (steady state ~2 concurrent per Little's law), so skipping the 3 fills on full batches is neutral. Two runs TPOT 3.64/3.59 (avg 3.615) vs baseline 3.61/3.62. No gain, reverted for simplicity. |
 | 23 | fuse qk-norm scale into rotary kernel (scale+rotate in one launch) | kernel | KEPT | ~0 (TPOT -1.4%, TTFT +) | QKNorm (bs>=2) now emits fp32 xf/var via prepare(); a new scale_rotate_kernel does the RMSNorm scale AND RoPE in one launch (was qk_scale 28 kernels + rotary 28 = 56 -> 28). Bit-identical (bf16 roundings match qk_scale exactly). decode_time 3136->3089us. TPOT 3.62->3.57, throughput 460.5 (1.006x vLLM) |
 | 24 | single-tensor prepare_decode (one H2D in graph mode) | sync | KEPT | ~0 (TPOT -1.3%) | prepare built 4 GPU tensors (input_ids/positions/context_lens/slot_mapping) = 4 H2D dispatches (~100us). Graph mode now builds one (bs,4) int32 tensor + strided column views (the graph-vars copies handle strides and int32->long casts); eager mode keeps the contiguous path. prepare 0.12->0.08ms. TPOT 3.57->3.52, TTFT 9.4->8.9 |
+| 25 | drop redundant graph-vars fills (exact-bs graphs never read padding) | sync | KEPT | ~0 (TPOT -0.3%) | graph_bs=[1,2,3,4,5] gives an exact graph for every bs, so the graphs never read beyond row bs; the 3 fills (slot_mapping/context_lens/block_tables) only reset rows the graphs never touch. Removed them (kept only when use_bs != bs, i.e. larger-graph padding). replay-launch 0.11->0.08ms, step 3.46->3.41. TPOT 3.525->3.515, throughput 460.1 |
 
 ## Details
 
@@ -263,6 +265,19 @@
 - Gap to vLLM now: throughput 1.004x, TPOT 1.11x (was 1.12x), TTFT 0.50x
 - Outcome: KEPT
 - Why it worked: the four small tensors shared one H2D + column slices; the graph path only needs the values in the contiguous gv buffers (copied by run_model), so strided int32 intermediates are harmless there. Kept a contiguous path for eager mode where store_kvcache/flash read context tensors directly.
+- Worth retrying? NO (done).
+
+## [25] 2026-10-10 09:55  Drop redundant graph-vars fills (KEPT)
+- Hypothesis and expected gain: graph_bs=[1,2,3,4,5] gives an EXACT graph for every bs in the engine, so a bs=3 step replays the bs=3 graph which only reads rows [0:3] of the shared graph-vars buffers. The 3 fills (slot_mapping/context_lens/block_tables) only reset rows [bs:max] that the exact graph never reads -> redundant -> remove ~3 GPU ops + dispatches from the per-step critical path.
+- Profile evidence: steptime replay-launch 0.11ms (5 copies + 3 fills + graph.replay). After: 0.08ms (-30us/step). Step 3.46->3.41ms.
+- Related earlier entries: [22] (fill-skip attempt was neutral because it only skipped at bs==max; this removes fills for ALL bs since exact graphs never read padding).
+- Change: src/run.py - run_model only fills the graph-vars padding sentinels when use_bs != bs (i.e. the next-larger graph is used, which only happens for max_bs > 4). commit 674de1d.
+- Correctness: PASS - bs=1 graph 0/37 vs reference; batched run1 vs run2 0/37.
+- Benchmark before (exp 24): 459.62/459.39 tok/s, TTFT 8.38/9.48, TPOT 3.54/3.51
+- Benchmark after (2 runs): 460.08/460.12 tok/s, TTFT 10.52/8.25 (p99 196/153), TPOT 3.52/3.51 (p99 3.81/3.72), ITL 3.52/3.51
+- Gap to vLLM now: throughput 1.005x, TPOT 1.11x, TTFT 0.53x
+- Outcome: KEPT
+- Why it worked: the fills were a leftover from when graphs padded up to a larger shape; with exact per-bs graphs the padding rows are never read, so the fills were pure overhead.
 - Worth retrying? NO (done).
 
 ## Backlog
