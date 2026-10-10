@@ -14,6 +14,7 @@
 | 7 | CUDA-graph prefill (pre-captured exact-shape graphs; eager prefill was host-bound ~40ms/step) | 459.27 | 19.86 | 4.28 | 1.003x |
 | - | vLLM 0.31.0 target (this machine, 2026-10-09) | 457.86 | 17.87 | 3.18 | 1.00x |
 | 8 | decode flash single-pass (num_splits=1) for seqlen<=256 via dual-graph hybrid | 459.02 | 17.72 | 4.11 | 1.003x |
+| 9 | merge q_norm+k_norm into one fused QKNorm call | 459.39 | 13.28 | 3.99 | 1.003x |
 
 ## Experiments tried
 
@@ -27,6 +28,7 @@
 | 12 | Fold RMSNorm pow (x*x) into convert_add kernel; keep mean reduction in torch | kernel | KEPT | ~0 (TPOT -4%) | x*x bit-identical to torch.pow(x,2); removes 113 pow launches/step. TPOT 4.66->4.47ms, throughput neutral |
 | 13 | CUDA-graph prefill: pre-captured exact-shape graphs (eager prefill host-bound ~40ms/step) | graphs | KEPT | ~0 (TTFT 54->20ms) | eager prefill = 680 kernel launches at ~66us each (~40ms) for only ~7ms GPU; exact-shape graph replay is 8ms and bit-identical. TTFT mean 54->20ms, TPOT 4.47->4.27ms |
 | 14 | decode flash single-pass (num_splits=1) for seqlen<=256 via dual-graph hybrid | kernel | KEPT | ~0 (TPOT -4.2%, TTFT -19%) | splitkv path costs split+combine kernels (~700us/step at bs=5); single-pass kernel is bit-identical for seqlen<=256 and ~7us/call faster. Dual-graph hybrid keeps splitkv for seqlen>256 (reference) -> gate passes. TPOT 4.28->4.11, TTFT 19.9->17.7 |
+| 15 | merge q_norm+k_norm into one fused QKNorm call (3 kernels/layer instead of 6) | kernel | KEPT | ~0 (TPOT -3.5%, TTFT -25%) | q_norm+k_norm are 56 tiny RMSNorm calls (~583us/step) dominated by fixed per-call kernel cost; merging rows into one convert+mean+scale (per-row-group weights) halves calls to 28. Per-row mean reduction unchanged -> bit-identical for bs>=2; bs=1 falls back to separate path (torch reduce config differs for 8-row k). TPOT 4.11->3.99, TTFT 17.7->13.3 |
 
 ## Details
 
@@ -157,6 +159,19 @@
 - Gap to vLLM now: throughput 1.003x, TPOT 1.29x (was 1.34x), TTFT 0.99x (was 1.12x)  <- TTFT now at/below vLLM mean
 - Outcome: KEPT
 - Why it worked: for seqlen<=256 the splitkv heuristic adds a redundant split+combine pair; the single-pass kernel is numerically identical there (flash-attn only splits at longer seqlen), so a graph per variant lets us take the fast path exactly where it's bit-identical and keep the reference path elsewhere.
+- Worth retrying? NO (done).
+
+## [15] 2026-10-10 07:10  Merge q_norm+k_norm into one fused QKNorm call (KEPT)
+- Hypothesis and expected gain: RMSNorm is ~1.2ms/step at bs=5 (34% of decode) per in-graph measurement (10.8us/hidden call x57 + 10.4us/head_dim call x56). The 56 q_norm+k_norm calls cost ~583us/step and are dominated by FIXED per-call kernel cost (convert+mean+scale ~10us regardless of 128 vs 1024 cols). Merging q+k into one row-block per layer (one convert, one torch mean, one scale with per-row-group weights) halves calls 56->28 -> expected ~250-280us/step saved.
+- Profile evidence: debug/op_micro.py + in-graph captures: RMSNorm hidden in-graph 10.8us/call, head_dim 10.4us/call; q_norm+k_norm 56 calls = 583us/step. decode_time.py: 3526us/step (hybrid) vs 3381us (QKNorm) = -145us/step.
+- Related earlier entries: [12] (RMSNorm pow fold), [5] (RMSNorm tail fusion), [3] (full fusion FAILED - reduction order).
+- Change: layers/layernorm.py - qk_convert_kernel, qk_scale_kernel, QKNorm module (merged convert/mean/scale with w_q for q rows, w_k for k rows; bs=1 nk<16 falls back to separate _rms_one path). src/qwen3.py - replace q_norm/k_norm with qk_norm, keeping q_norm/k_norm as shared-storage submodule aliases so utils/loader.py finds the checkpoint's q_norm.weight/k_norm.weight (real non-identity values). commit fb33d9c.
+- Correctness: PASS - bs=1 graph 0/37 vs pre-change reference (fallback path); batched run1 vs run2 0/37. Key subtlety found: merging the mean over (24,128) vs standalone (8,128) is NOT bit-identical at bs=1 (torch picks a different reduce_kernel config for 8 rows) - hence the bs=1 fallback. bs=2-5 merged mean is bit-identical (verified per-bs).
+- Benchmark before (exp 14): 458.70-459.33 tok/s, TTFT 16.14/19.29, TPOT 4.10/4.12, ITL 4.10/4.13
+- Benchmark after (2 runs): 459.54 then 459.24 tok/s, TTFT 13.68/12.88 (p99 272/258), TPOT 3.97/4.00 (p99 4.27/4.31), ITL 3.97/4.00
+- Gap to vLLM now: throughput 1.003x, TPOT 1.25x (was 1.29x), TTFT 0.74x (was 0.99x)  <- TTFT now well below vLLM
+- Outcome: KEPT
+- Why it worked: per-row mean reduction is independent of row count (same reduce kernel for the rows), so merging q+k rows into one tensor keeps per-row numerics identical for bs>=2; the fallback covers the one shape (bs=1, 8 k-rows) where torch's reduce config changes. Halved the fixed kernel cost of the two smallest norm calls.
 - Worth retrying? NO (done).
 
 ## Backlog
