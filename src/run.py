@@ -108,7 +108,6 @@ class Run:
         self.prefill_capture_max = 128
         self.capture_stats = {"n": 0, "wall": 0.0, "shapes": {}}
         self._device = torch.device(self.device)
-        self._bt_cache = {}   # (seq_id tuple) -> stacked padded block table
 
         print(f"Loading model onto device : {self.device}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model)
@@ -252,12 +251,32 @@ class Run:
         device         = torch.device(self.device)
 
         # Static buffers — addresses are frozen for the lifetime of the graphs.
-        input_ids      = torch.zeros(max_bs, dtype=torch.long,  device=device)
-        positions      = torch.zeros(max_bs, dtype=torch.long,  device=device)
-        slot_mapping   = torch.zeros(max_bs, dtype=torch.int32, device=device)
-        context_lens   = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        # The decode input (token, pos, ctx_len, slot, block-table row) is
+        # assembled on the CPU as one (bs, 4+max_num_blocks) int32 tensor and
+        # H2D'd into `tbuf`; a dedicated copy-graph distributes it into the
+        # model's static input buffers (g_input/g_pos/g_slot/g_ctx/btbuf) in
+        # ONE replay, so run_model does no per-step __setitem__ copies at all.
+        tbuf           = torch.zeros(max_bs, 4 + max_num_blocks, dtype=torch.int32, device=device)
+        g_input        = torch.zeros(max_bs, dtype=torch.long,  device=device)
+        g_pos          = torch.zeros(max_bs, dtype=torch.long,  device=device)
+        g_slot         = torch.zeros(max_bs, dtype=torch.int32, device=device)
+        g_ctx          = torch.zeros(max_bs, dtype=torch.int32, device=device)
         block_tables   = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device=device)
         outputs        = torch.zeros(max_bs, self.hf_config.vocab_size, dtype=self.dtype, device=device)
+
+        # copy-graph: tbuf -> the model's input buffers (casts int32->long for
+        # ids/positions; exact, so bit-identical to the old __setitem__ copies).
+        cg = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(cg, self.graph_pool):
+            g_input[:] = tbuf[:, 0]
+            g_pos[:] = tbuf[:, 1]
+            g_ctx[:] = tbuf[:, 2]
+            g_slot[:] = tbuf[:, 3]
+            block_tables[:] = tbuf[:, 4:4 + max_num_blocks]
+        if self.graph_pool is None:
+            self.graph_pool = cg.pool()
+        self.copy_graph = cg
+        torch.cuda.synchronize()
 
         self.graph_bs  = [bs for bs in (1,2,3,4) if bs <= max_bs]
 
@@ -278,8 +297,8 @@ class Run:
                 graph = torch.cuda.CUDAGraph()
                 set_context(
                     is_prefill=False,
-                    slot_mapping=slot_mapping[:bs],
-                    context_lens=context_lens[:bs],
+                    slot_mapping=g_slot[:bs],
+                    context_lens=g_ctx[:bs],
                     block_tables=block_tables[:bs],
                     use_fast_flash=use_fast,
                 )
@@ -287,9 +306,9 @@ class Run:
                 # Warmup run (lazy allocs / autotune happen OUTSIDE the graph).
                 # Capture the full forward INCLUDING lm_head so the logits GEMM
                 # runs inside the graph instead of eagerly every decode step.
-                outputs[:bs] = self.custom_model(input_ids[:bs], positions[:bs])
+                outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
                 with torch.cuda.graph(graph, self.graph_pool):
-                    outputs[:bs] = self.custom_model(input_ids[:bs], positions[:bs])
+                    outputs[:bs] = self.custom_model(g_input[:bs], g_pos[:bs])
 
                 if self.graph_pool is None:
                     self.graph_pool = graph.pool()
@@ -299,10 +318,11 @@ class Run:
                 reset_context()
 
         self.graph_vars = dict(
-            input_ids=input_ids,
-            positions=positions,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
+            tbuf=tbuf,
+            g_input=g_input,
+            g_pos=g_pos,
+            g_slot=g_slot,
+            g_ctx=g_ctx,
             block_tables=block_tables,
             outputs=outputs
         )
@@ -315,6 +335,15 @@ class Run:
             return self.run_prefill(input_ids, positions)
 
         if self.enforce_eager or not self.graphs or input_ids.size(0) > self.graph_bs[-1]:
+            if not self.enforce_eager and self.graphs:
+                # Graph-mode fallback for a batch larger than any captured
+                # graph (does not occur with the current admission limits):
+                # populate the model's input buffers via the copy-graph, then
+                # run the eager forward on them.
+                self.copy_graph.replay()
+                gv = self.graph_vars
+                bs = input_ids.size(0)
+                return self.custom_model(gv["g_input"][:bs], gv["g_pos"][:bs])
             return self.custom_model(input_ids, positions)
 
         bs      = input_ids.size(0)
@@ -324,18 +353,17 @@ class Run:
         graph   = pool[use_bs]
         gv      = self.graph_vars
 
-        gv["input_ids"][:bs] = input_ids
-        gv["positions"][:bs] = positions
+        # prepare_decode already wrote the (bs, 4+max_num_blocks) int32 rows
+        # into gv["tbuf"] (one H2D). The copy-graph distributes them into the
+        # model's input buffers (g_input/g_pos/g_slot/g_ctx/block_tables) in a
+        # single replay, replacing the five per-step __setitem__ copies.
         if use_bs != bs:
             # Only when bs does not exactly match a captured graph do we pad up
             # to a larger shape; those padding rows need deterministic sentinels.
-            gv["slot_mapping"].fill_(-1)          # padding rows write nowhere
-            gv["context_lens"].zero_()            # padding rows attend to nothing
-            gv["block_tables"].fill_(-1)          # keep padding deterministic (-1)
-        gv["slot_mapping"][:bs] = context.slot_mapping
-        gv["context_lens"][:bs] = context.context_lens
-        gv["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-
+            gv["g_slot"].fill_(-1)          # padding rows write nowhere
+            gv["g_ctx"].zero_()             # padding rows attend to nothing
+            gv["block_tables"].fill_(-1)    # keep padding deterministic (-1)
+        self.copy_graph.replay()
         graph.replay()
 
         return gv["outputs"][:bs]
@@ -559,7 +587,6 @@ class Run:
 
     def prepare_decode(self, seqs):
         rows = []
-        block_tables = []
         max_ctx = 0
 
         for seq in seqs:
@@ -572,26 +599,14 @@ class Run:
                 seq.block_table_ids[pos // self.block_size] * self.block_size
                 + pos % self.block_size
             )
-            rows.append([seq.last_token, pos, len(seq.token_ids), slot])
+            # Block-table row padded to max_num_blocks with -1 (block tables
+            # are pre-allocated at admission and never change during decode).
+            bt_ids = seq.block_table_ids[:self.max_num_blocks]
+            bt_pad = [-1] * (self.max_num_blocks - len(bt_ids))
+            rows.append([seq.last_token, pos, len(seq.token_ids), slot] + bt_ids + bt_pad)
             max_ctx = max(max_ctx, len(seq.token_ids))
 
-            block_tables.append(self._padded_bt_row(seq))
-
         device = self._device
-        # The padded block-table rows are constant for a sequence's lifetime
-        # (all blocks are pre-allocated at admission), so the stacked (bs,8)
-        # batch table is constant for a given set+order of sequences. Cache it
-        # by the seq-id tuple: consecutive decode steps reuse the same running
-        # set and skip the torch.stack entirely.
-        key = tuple(s.seq_id for s in seqs)
-        bt = self._bt_cache.get(key)
-        if bt is None:
-            if len(seqs) == 1:
-                bt = block_tables[0].unsqueeze(0)
-            else:
-                bt = torch.stack(block_tables, dim=0)  # (bs, max_num_blocks)
-            if len(self._bt_cache) < 2048:
-                self._bt_cache[key] = bt
 
         if self.enforce_eager:
             # Eager mode: the model reads slot_mapping/context_lens directly
@@ -600,16 +615,25 @@ class Run:
             positions = torch.tensor([r[1] for r in rows], dtype=torch.long, device=device)
             context_lens = torch.tensor([r[2] for r in rows], dtype=torch.int32, device=device)
             slot_mapping = torch.tensor([r[3] for r in rows], dtype=torch.int32, device=device)
+            bt = torch.stack([self._padded_bt_row(seq) for seq in seqs], dim=0)
+            input_ids_t, positions_t = input_ids, positions
         else:
-            # Graph mode: one (bs,4) int32 H2D; the strided column views are
-            # fine because run_model copies them into the contiguous graph
-            # buffers (casting int32->long for ids/positions). Saves 3 tensor
-            # constructions (~70us/step of exposed CPU).
-            t = torch.tensor(rows, dtype=torch.int32, device=device)
-            input_ids = t[:, 0]
-            positions = t[:, 1]
-            context_lens = t[:, 2]
-            slot_mapping = t[:, 3]
+            # Graph mode: assemble the whole decode input (token, pos, ctx_len,
+            # slot, block-table row) into tbuf with ONE H2D; the copy-graph
+            # distributes it into the model's input buffers on replay. No
+            # torch.stack, no per-column copies on the CPU side.
+            gv = self.graph_vars
+            tbuf = gv["tbuf"]
+            tbuf[:len(rows)].copy_(torch.tensor(rows, dtype=torch.int32))
+            input_ids_t = tbuf[:len(rows), 0]
+            positions_t = tbuf[:len(rows), 1]
+            # Point the context at the model's static (contiguous) buffers so
+            # any eager fallback reads the values the copy-graph will produce.
+            input_ids = gv["g_input"][:len(rows)]
+            positions = gv["g_pos"][:len(rows)]
+            context_lens = gv["g_ctx"][:len(rows)]
+            slot_mapping = gv["g_slot"][:len(rows)]
+            bt = gv["block_tables"][:len(rows)]
 
         set_context(
             is_prefill=False,
@@ -619,7 +643,7 @@ class Run:
             use_fast_flash=max_ctx <= self.block_size,   # CPU-side, no sync
         )
 
-        return input_ids, positions
+        return input_ids_t, positions_t
 
     @staticmethod
     def _percentile(values, q):
