@@ -9,11 +9,17 @@ def convert_add_kernel(
     x_ptr,        # bf16 (rows, n)
     r_ptr,        # bf16 (rows, n), ignored if HAS_RES==False
     xf_ptr,       # fp32 out (rows, n)
+    x2_ptr,       # fp32 out (rows, n): x*x (== torch.pow(x,2) bit-identically)
     res_ptr,      # bf16 out (rows, n), ignored if HAS_RES==False
     n_cols: tl.constexpr,
     HAS_RES: tl.constexpr,
 ):
-    """xf = x.to(f32) (+ r.to(f32)); res = round_bf16(xf) when HAS_RES."""
+    """xf = x.to(f32) (+ r.to(f32)); res = round_bf16(xf) when HAS_RES;
+    x2 = xf*xf so the var reduction can skip a separate pow kernel.
+
+    xf*xf is bit-identical to torch.pow(xf, 2.0) (verified on this GPU), so
+    torch's mean reduction over x2 produces the identical var as the old
+    xf.pow(2).mean(-1)."""
     row = tl.program_id(0)
     offs = row * n_cols + tl.arange(0, n_cols)
     x = tl.load(x_ptr + offs).to(tl.float32)
@@ -22,6 +28,7 @@ def convert_add_kernel(
         x = x + r
         tl.store(res_ptr + offs, x.to(x_ptr.dtype.element_ty))
     tl.store(xf_ptr + offs, x)
+    tl.store(x2_ptr + offs, x * x)
 
 
 @triton.jit
@@ -62,12 +69,13 @@ class RMSNorm(nn.Module):
         x = x.contiguous()
         n_rows = x.numel() // self.hidden_size
         xf = torch.empty(n_rows, self.hidden_size, dtype=torch.float32, device=x.device)
+        x2 = torch.empty(n_rows, self.hidden_size, dtype=torch.float32, device=x.device)
         res = torch.empty_like(x) if residual is not None else None
         convert_add_kernel[(n_rows,)](
-            x, residual if residual is not None else x, xf, res,
+            x, residual if residual is not None else x, xf, x2, res,
             self.hidden_size, residual is not None,
         )
-        var = xf.pow(2).mean(dim=-1, keepdim=True)
+        var = x2.mean(dim=-1, keepdim=True)
         y = torch.empty_like(x)
         rms_scale_kernel[(n_rows,)](
             xf, var.view(n_rows), self.weight, y, self.hidden_size, self.eps,
