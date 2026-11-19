@@ -64,6 +64,33 @@ def load_questions(path: str, num_prompts: int | None) -> list[str]:
     return prompts
 
 
+def lib_versions() -> dict:
+    """Library and GPU versions, logged with every result (flag names change between versions)."""
+    import importlib
+    out = {}
+    for mod in ("torch", "triton", "flash_attn", "vllm", "transformers"):
+        try:
+            out[mod] = importlib.import_module(mod).__version__
+        except Exception:
+            out[mod] = None
+    try:
+        import torch
+        out["cuda"] = torch.version.cuda
+        out["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    except Exception:
+        pass
+    return out
+
+
+def save_outputs(args, texts: list[str]):
+    """Write generated texts (one JSON line per prompt, in prompt order) for correctness diffs."""
+    if not args.save_outputs:
+        return
+    with open(args.save_outputs, "w", encoding="utf-8") as f:
+        for i, t in enumerate(texts):
+            f.write(json.dumps({"i": i, "text": t}) + "\n")
+
+
 def count_output_tokens(tokenizer, texts: list[str]) -> int:
     """Count generated tokens by re-encoding output text.
 
@@ -126,9 +153,11 @@ def run_tokn(args) -> dict:
         max_length=args.max_model_len,
         max_model_len=args.max_model_len,
         tensor_parallel_size=args.tensor_parallel_size,
-        enforce_eager=True,               # non-eager path is still buggy in tokn
-        max_num_seqs=TOKN_MAX_NUM_SEQS,
+        enforce_eager=args.tokn_enforce_eager,
+        max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=TOKN_MAX_NUM_BATCHED_TOKENS,
+        num_kv_blocks=args.tokn_num_kv_blocks,
+        gpu_memory_utilization=args.gpu_memory_utilization,
     )
 
     llm = LLM(
@@ -186,8 +215,13 @@ def run_tokn(args) -> dict:
     tpots = [s.tpot for s in finished_seqs if s.tpot is not None]
     itls = [gap for s in finished_seqs for gap in s.itls]
 
+    save_outputs(args, texts)
+
     return {
         "framework": "tokn",
+        "versions": lib_versions(),
+        "num_kv_blocks": llm.block_manager.num_blocks,
+        "num_preemptions": llm.scheduler.num_preemptions,
         "num_prompts": len(prompts),
         "elapsed_s": elapsed,
         "output_tokens": out_tokens,
@@ -253,7 +287,7 @@ def run_vllm(args) -> dict:
         # Match tokn feature set.
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
-        max_num_seqs=TOKN_MAX_NUM_SEQS,
+        max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=TOKN_MAX_NUM_BATCHED_TOKENS,
         gpu_memory_utilization=args.gpu_memory_utilization,
         # Required so RequestOutput.metrics (TTFT / token timestamps) is populated.
@@ -275,9 +309,11 @@ def run_vllm(args) -> dict:
 
     out_tokens = sum(len(o.outputs[0].token_ids) for o in request_outputs)
     ttfts, tpots, itls = _extract_vllm_metrics(request_outputs)
+    save_outputs(args, [o.outputs[0].text for o in request_outputs])
 
     return {
         "framework": "vllm",
+        "versions": lib_versions(),
         "num_prompts": len(prompts),
         "elapsed_s": elapsed,
         "output_tokens": out_tokens,
@@ -304,7 +340,7 @@ def _run_vllm_async(args, prompts) -> dict:
         enforce_eager=args.vllm_enforce_eager,
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
-        max_num_seqs=TOKN_MAX_NUM_SEQS,
+        max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=TOKN_MAX_NUM_BATCHED_TOKENS,
         gpu_memory_utilization=args.gpu_memory_utilization,
         disable_log_stats=False,
@@ -349,9 +385,11 @@ def _run_vllm_async(args, prompts) -> dict:
 
     out_tokens = sum(len(o.outputs[0].token_ids) for o in request_outputs if o is not None)
     ttfts, tpots, itls = _extract_vllm_metrics(request_outputs)
+    save_outputs(args, [o.outputs[0].text if o is not None else "" for o in request_outputs])
 
     return {
         "framework": "vllm",
+        "versions": lib_versions(),
         "num_prompts": len(prompts),
         "elapsed_s": elapsed,
         "output_tokens": out_tokens,
@@ -404,6 +442,13 @@ def run_in_subprocess(framework: str, args) -> dict | None:
         cmd += ["--block-size", str(args.block_size)]
     if args.vllm_enforce_eager:
         cmd += ["--vllm-enforce-eager"]
+    if args.tokn_enforce_eager:
+        cmd += ["--tokn-enforce-eager"]
+    cmd += ["--max-num-seqs", str(args.max_num_seqs)]
+    if args.tokn_num_kv_blocks is not None:
+        cmd += ["--tokn-num-kv-blocks", str(args.tokn_num_kv_blocks)]
+    if args.save_outputs:
+        cmd += ["--save-outputs", f"{args.save_outputs}.{framework}.jsonl"]
 
     # tokn's TP>1 hangs without disabling NCCL P2P inside this container.
     env = os.environ.copy()
@@ -493,6 +538,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Python interpreter to run vLLM (its conda env). Used in 'both' mode.")
     p.add_argument("--vllm-enforce-eager", action="store_true",
                    help="Force vLLM eager mode. Omit this to allow vLLM torch.compile/CUDA graphs.")
+    p.add_argument("--max-num-seqs", type=int, default=TOKN_MAX_NUM_SEQS,
+                   help="Max concurrent sequences for both engines (default: tokn's scheduler default).")
+    p.add_argument("--tokn-num-kv-blocks", type=int, default=None,
+                   help="Override tokn KV cache size in blocks (to test preemption under memory pressure).")
+    p.add_argument("--tokn-enforce-eager", action="store_true",
+                   help="Force tokn eager mode. Omit this to use tokn CUDA graphs for decode.")
+    p.add_argument("--save-outputs", default=None,
+                   help="Write generated texts as JSONL to this path (for correctness diffs).")
     p.add_argument("--emit-json", action="store_true",
                    help="Print machine-readable result line (used by subprocess runner).")
     return p
