@@ -15,6 +15,7 @@ class Scheduler:
 
         self.decode_steps_since_prefill = 0
         self.prefill_interval = 8
+        self.num_preemptions = 0
 
     def add(self, seq):
         self.waiting.append(seq)
@@ -33,29 +34,33 @@ class Scheduler:
 
         # DECODE
         if should_decode_first:
-            while self.running and len(scheduled) < self.max_num_seqs:
-                seq = self.running.popleft()
-                seq.num_scheduled_tokens = 1
-                scheduled.append(seq)
-
-            self.decode_steps_since_prefill += 1
-            return scheduled, False
+            return self.schedule_decode(), False
 
         # PREFILL
         if self.waiting:
             num_batched_tokens = 0
+            # Seqs holding KV blocks: running + half-prefilled ones in waiting.
+            num_active = len(self.running) + sum(s.block_table is not None for s in self.waiting)
 
             while self.waiting and len(scheduled) < self.max_num_seqs:
                 seq = self.waiting[0]
 
                 if seq.block_table is None:
+                    if num_active >= self.max_num_seqs:
+                        break
+
+                    # Lazy: allocate only for current tokens, decode grows it later.
+                    if len(self.block_manager.free_block_ids) < self.block_manager._num_blocks(seq.token_ids):
+                        break
+
                     cached_blocks         = self.block_manager.match_prefix(seq.token_ids)
-                    alloc_token_ids       = seq.token_ids + ([0] * seq.max_tokens)
-                    block_table_ids       = self.block_manager.allocate(token_ids=alloc_token_ids, num_cached_blocks=cached_blocks)
+                    cached_blocks         = min(cached_blocks, (seq.num_tokens - 1) // self.block_manager.block_size)  # always recompute last token
+                    block_table_ids       = self.block_manager.allocate(token_ids=seq.token_ids, num_cached_blocks=cached_blocks)
                     seq.block_table_ids   = block_table_ids
                     seq.block_table       = self.block_manager.make_block_table_tensor(block_table=block_table_ids,device=self.device)
                     seq.num_cached_tokens = cached_blocks * self.block_manager.block_size
                     seq.num_hashed_blocks = cached_blocks
+                    num_active += 1
 
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
 
@@ -87,8 +92,56 @@ class Scheduler:
                 self.decode_steps_since_prefill = 0
                 return scheduled, True
 
-        return scheduled, False
-     
+        # Nothing fit for prefill: keep decoding so running seqs free blocks.
+        return self.schedule_decode(), False
+
+    def schedule_decode(self):
+        scheduled = []
+
+        while self.running and len(scheduled) < self.max_num_seqs:
+            seq = self.running.popleft()
+
+            # Need a new block for this token? Preempt newest seqs until one is free.
+            while not self.can_append(seq):
+                if self.running:
+                    self.preempt(self.running.pop())
+                else:
+                    self.preempt(seq)
+                    break
+            else:
+                seq.num_scheduled_tokens = 1
+                scheduled.append(seq)
+
+        self.decode_steps_since_prefill += 1
+        return scheduled
+
+    def can_append(self, seq):
+        if len(seq.block_table_ids) * self.block_manager.block_size >= seq.num_tokens:
+            return True
+
+        if not self.block_manager.free_block_ids:
+            return False
+
+        seq.block_table_ids.append(self.block_manager._allocate_one_block())
+        seq.block_table = self.block_manager.make_block_table_tensor(block_table=seq.block_table_ids, device=self.device)
+        return True
+
+    def preempt(self, seq):
+        # Free blocks and send back to waiting; it gets re-prefilled later.
+        self.block_manager.deallocate(seq.block_table_ids)
+        seq.block_table_ids = None
+        seq.block_table = None
+        seq.num_cached_tokens = 0
+        seq.num_hashed_blocks = 0
+        seq.status = "WAITING"
+
+        # Front of waiting, but behind half-prefilled seqs (they hold blocks).
+        i = 0
+        while i < len(self.waiting) and self.waiting[i].block_table is not None:
+            i += 1
+        self.waiting.insert(i, seq)
+        self.num_preemptions += 1
+
     def is_finished(self):
         return not self.waiting and not self.running
 
@@ -101,7 +154,7 @@ class Scheduler:
 
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:
                 seq.status = "WAITING"
-                self.waiting.append(seq)
+                self.waiting.appendleft(seq)    # already holds blocks, finish it first
                 continue
 
             seq.append_token(token_id)

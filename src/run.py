@@ -110,6 +110,8 @@ class Run:
         self.custom_model = self.custom_model.to(dtype=self.dtype, device=self.device)
 
         #Initializing the KV Cache
+        if self.device.startswith("cuda"):
+            self.warmup_model()
         self.allocate_kv_cache()
 
         if self.device.startswith("cuda") and not self.enforce_eager:
@@ -126,6 +128,32 @@ class Run:
                 dist.barrier()
                 self.shm = SharedMemory(name="tokn")
                 self.loop()
+
+    @torch.inference_mode()
+    def warmup_model(self):
+        """
+        Dummy prefill of the largest token batch, run before the KV cache
+        exists, so allocate_kv_cache can measure peak activation memory.
+        """
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        max_num_batched_tokens = self.config.max_num_batched_tokens
+        seq_len  = min(max_num_batched_tokens, self.max_model_len)
+        num_seqs = max(1, min(max_num_batched_tokens // seq_len, self.config.max_num_seqs))
+        num_tokens = seq_len * num_seqs
+
+        cu_seqlens = torch.arange(0, num_tokens + 1, seq_len, dtype=torch.int32, device=self.device)
+        set_context(is_prefill=True, cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=seq_len, max_seqlen_k=seq_len)
+        try:
+            input_ids = torch.zeros(num_tokens, dtype=torch.long, device=self.device)
+            positions = torch.arange(seq_len, device=self.device).repeat(num_seqs)
+            self.custom_model(input_ids, positions)
+        finally:
+            reset_context()
+
+        torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
         """
@@ -150,18 +178,33 @@ class Run:
 
         head_dim = getattr(config, 'head_dim', None) or config.hidden_size // config.num_attention_heads
 
-        requested_num_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
+        block_bytes = 2 * num_layers * self.block_size * num_kv_heads * head_dim * self.dtype.itemsize
 
-        # Static sizing with headroom for multi-request batching.
-        max_num_seqs = max(1, getattr(self.config, "max_num_seqs", 1))
-        self.num_blocks = requested_num_blocks * max_num_seqs + 16
+        if self.config.num_kv_blocks:
+            self.num_blocks = self.config.num_kv_blocks
+        elif self.device.startswith("cuda"):
+            # Same rule as nano-vllm: the KV cache gets what is left of
+            # gpu_memory_utilization * total after weights, other memory
+            # (CUDA context, other processes) and the warmup's activation peak.
+            free, total = torch.cuda.mem_get_info()
+            stats   = torch.cuda.memory_stats()
+            used    = total - free
+            peak    = stats["allocated_bytes.all.peak"]
+            current = stats["allocated_bytes.all.current"]
+            self.num_blocks = int(total * self.config.gpu_memory_utilization - used - peak + current) // block_bytes
 
-        logger.info(
-            "KV cache sizing (static): max_model_len=%d, requested_blocks=%d, selected_blocks=%d",
-            self.max_model_len,
-            requested_num_blocks,
-            self.num_blocks,
-        )
+            # Every TP rank must use the same block ids.
+            if self.world_size > 1:
+                n = torch.tensor(self.num_blocks, device=self.device)
+                dist.all_reduce(n, op=dist.ReduceOp.MIN)
+                self.num_blocks = int(n.item())
+        else:
+            max_num_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
+            self.num_blocks = max_num_blocks * self.config.max_num_seqs + 16
+
+        assert self.num_blocks > 0, "no GPU memory left for the KV cache"
+        logger.info("KV cache: %d blocks x %d tokens (%.2f GiB)",
+                    self.num_blocks, self.block_size, self.num_blocks * block_bytes / 2**30)
 
         self.kv_cache = torch.empty(
             2,            # K and V
@@ -248,7 +291,8 @@ class Run:
         block_tables   = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device=device)
         outputs        = torch.zeros(max_bs, hidden_size, dtype=self.dtype, device=device)
 
-        self.graph_bs  = [bs for bs in (1,2,3,4) if bs <= max_bs]
+        # Same capture sizes as nano-vllm; a batch replays the smallest graph >= its size.
+        self.graph_bs  = [bs for bs in [1, 2, 4, 8, *range(16, max_bs + 1, 16)] if bs <= max_bs]
 
         if max_bs not in self.graph_bs:
             self.graph_bs.append(max_bs)

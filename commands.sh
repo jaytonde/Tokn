@@ -4,7 +4,7 @@ python serve.py --model Qwen/Qwen2.5-0.5B --dtype bf16 --max_length 2048
 python serve.py --model Qwen/Qwen3-0.6B --dtype bf16 --max_length 2048 --device cuda:1
 
 # --------------------------------------------------------------------------- #
-# Benchmark commands (continuous batching + staggered arrivals, request-rate=2)
+# Benchmark commands (continuous batching, all requests submitted at once)
 # --------------------------------------------------------------------------- #
 
 # tokn  (uses inference_optimization conda env, clears conflicting bashrc CUDA paths)
@@ -17,8 +17,7 @@ env -u LD_LIBRARY_PATH -u CUDA_HOME -u CUDA_PATH \
 	--max-tokens 256 \
 	--max-model-len 2048 \
 	--questions data/questions.jsonl \
-	--num-prompts 400 \
-	--request-rate 2
+	--num-prompts 400
 
 # vLLM  (uses vllm_env conda env)
 /data1/home/mahek.shah/conda-envs/vllm_env/bin/python benchmark.py \
@@ -29,8 +28,7 @@ env -u LD_LIBRARY_PATH -u CUDA_HOME -u CUDA_PATH \
 	--max-tokens 256 \
 	--max-model-len 2048 \
 	--questions data/questions.jsonl \
-	--num-prompts 400 \
-	--request-rate 2
+	--num-prompts 400
 
 
 #Tensor Parallelism
