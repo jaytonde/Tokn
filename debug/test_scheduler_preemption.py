@@ -96,6 +96,9 @@ def check_invariants(bm: BlockManager, sched: Scheduler, in_flight=()):
     assert set(holders) == bm.used_block_ids, "used blocks without a holder (leak)"
     assert not (set(bm.free_block_ids) & bm.used_block_ids)
     assert len(bm.free_block_ids) + len(bm.used_block_ids) == bm.num_blocks
+    num_active = sum(1 for s in {id(s): s for s in [*sched.running, *sched.waiting, *in_flight]}.values()
+                     if getattr(s, "block_table_ids", None) is not None)
+    assert num_active <= sched.max_num_seqs, f"{num_active} seqs hold KV blocks > max_num_seqs {sched.max_num_seqs}"
 
 
 def run_case(seed, num_blocks, block_size, max_num_seqs, max_batched, n_req, shared_prefix):

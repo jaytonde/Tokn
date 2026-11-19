@@ -39,11 +39,16 @@ class Scheduler:
         # PREFILL
         if self.waiting:
             num_batched_tokens = 0
+            # Seqs holding KV blocks: running + half-prefilled ones in waiting.
+            num_active = len(self.running) + sum(s.block_table is not None for s in self.waiting)
 
             while self.waiting and len(scheduled) < self.max_num_seqs:
                 seq = self.waiting[0]
 
                 if seq.block_table is None:
+                    if num_active >= self.max_num_seqs:
+                        break
+
                     # Lazy: allocate only for current tokens, decode grows it later.
                     if len(self.block_manager.free_block_ids) < self.block_manager._num_blocks(seq.token_ids):
                         break
@@ -55,6 +60,7 @@ class Scheduler:
                     seq.block_table       = self.block_manager.make_block_table_tensor(block_table=block_table_ids,device=self.device)
                     seq.num_cached_tokens = cached_blocks * self.block_manager.block_size
                     seq.num_hashed_blocks = cached_blocks
+                    num_active += 1
 
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
 
